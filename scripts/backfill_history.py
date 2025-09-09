@@ -25,26 +25,21 @@ from core.history_api import HistoryAPI, HistoryConfig
 
 
 def main():
-    parser = argparse.ArgumentParser(description="历史在线拉取（QMT 实参接线，不落库版）")
-    parser.add_argument("--codes", type=str, required=True, help="逗号分隔代码，如 000001.SZ,600000.SH")
-    parser.add_argument("--period", type=str, default="1m", choices=["1m", "1h", "1d"])
-    parser.add_argument("--start", type=str, required=True, help="起始时间 ISO8601，如 2025-01-01T09:30:00+08:00")
-    parser.add_argument("--end", type=str, required=True, help="结束时间 ISO8601，如 2025-01-01T15:00:00+08:00")
+    parser = argparse.ArgumentParser(description="历史拉取（先补后取，宽表输出）")
+    parser.add_argument("--codes", type=str, required=True)
+    parser.add_argument("--period", type=str, default="1d", choices=["1m", "1h", "1d"])
+    parser.add_argument("--start", type=str, required=True, help="ISO8601，如 2025-01-01T09:30:00+08:00")
+    parser.add_argument("--end", type=str, required=True, help="ISO8601")
     parser.add_argument("--dividend", type=str, default="none", choices=["none", "front", "back", "ratio"])
-    parser.add_argument("--return-data", action="store_true", help="是否返回数据集（默认仅摘要）")
+    parser.add_argument("--return-data", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    # 1) 连接 QMT
-    qmt_cfg = QMTConfig(token="${QMT_TOKEN}")  # 建议从环境变量或 qmt.yml 注入
-    connector = QMTConnector(qmt_cfg)
-    connector.listen_and_connect()
+    qmt_cfg = QMTConfig(mode="none")
+    QMTConnector(qmt_cfg).listen_and_connect()
 
-    # 2) 历史 API（不落库）
-    hist_cfg = HistoryConfig(batch_size=3000, dividend_type=args.dividend, default_period=args.period)
-    api = HistoryAPI(hist_cfg)
-
+    api = HistoryAPI(HistoryConfig(use_batch_get_in=True, fill_data_on_get=False, dividend_type=args.dividend))
     codes = [c.strip() for c in args.codes.split(",") if c.strip()]
     result = api.fetch_bars(
         codes=codes,
@@ -54,7 +49,6 @@ def main():
         dividend_type=args.dividend,
         return_data=args.return_data,
     )
-
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
