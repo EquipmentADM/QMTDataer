@@ -1,4 +1,9 @@
-"""QMTConnector 单元测试（M2.5 版）
+"""QMTConnector 单元测试（M2.5 版，修订）
+
+修订点：
+    - 为避免真实环境已安装 xtquant 导致“缺依赖”用例失效，加入 import 拦截（patch builtins.__import__）；
+    - 为避免子模块属性缺失，给顶层 xtquant 绑定 xtdatacenter/xtdata 属性；
+    - 为避免模块缓存污染，reload 改为先从 sys.modules 移除后再 import。
 
 类说明：
     - 覆盖 mode='none' 跳过 listen、legacy 成功、legacy 失败、依赖缺失、ok 状态；
@@ -11,9 +16,11 @@ import sys
 import types
 import importlib
 import unittest
+from unittest import mock
 
 
 def _install_fake_xtquant(listen_side_effect=None):
+    """安装假的 xtquant 包，并将子模块绑定到顶层属性。"""
     xtquant = types.ModuleType("xtquant")
     xtdc = types.ModuleType("xtquant.xtdatacenter")
     xtdata = types.ModuleType("xtquant.xtdata")
@@ -31,20 +38,23 @@ def _install_fake_xtquant(listen_side_effect=None):
     xtdc.init = init
     xtdc.listen = listen
 
+    # 绑定到顶层属性，避免 AttributeError: module 'xtquant' has no attribute 'xtdata'
+    xtquant.xtdatacenter = xtdc
+    xtquant.xtdata = xtdata
+
     sys.modules["xtquant"] = xtquant
     sys.modules["xtquant.xtdatacenter"] = xtdc
     sys.modules["xtquant.xtdata"] = xtdata
 
 
-def _reload_qmt_connector():
-    if "core.qmt_connector" in sys.modules:
-        importlib.reload(sys.modules["core.qmt_connector"])
-    else:
-        import core.qmt_connector  # noqa
+def _reload_qmt_connector_fresh():
+    """从 sys.modules 移除后再导入，确保按当前注入的 xtquant 重新求值。"""
+    sys.modules.pop("core.qmt_connector", None)
+    import core.qmt_connector  # noqa
 
 
 class TestQMTConnector(unittest.TestCase):
-    """类说明：QMTConnector 行为测试（M2.5）
+    """类说明：QMTConnector 行为测试（M2.5 修订）
     功能：mode 分支、异常路径与 ok 状态。
     上游：无。
     下游：QMTConnector。
@@ -57,7 +67,7 @@ class TestQMTConnector(unittest.TestCase):
         预期输出：connector.ok == True。
         """
         _install_fake_xtquant()
-        _reload_qmt_connector()
+        _reload_qmt_connector_fresh()
         from core.qmt_connector import QMTConnector, QMTConfig
         conn = QMTConnector(QMTConfig(mode="none"))
         conn.listen_and_connect()
@@ -75,7 +85,7 @@ class TestQMTConnector(unittest.TestCase):
             self.assertIsInstance(port, int)
             return None
         _install_fake_xtquant(listen_side_effect=side_effect)
-        _reload_qmt_connector()
+        _reload_qmt_connector_fresh()
         from core.qmt_connector import QMTConnector, QMTConfig
         conn = QMTConnector(QMTConfig(mode="legacy"))
         conn.listen_and_connect()
@@ -91,7 +101,7 @@ class TestQMTConnector(unittest.TestCase):
         def side_effect(_):
             raise RuntimeError("server only support xt user mode")
         _install_fake_xtquant(listen_side_effect=side_effect)
-        _reload_qmt_connector()
+        _reload_qmt_connector_fresh()
         from core.qmt_connector import QMTConnector, QMTConfig
         conn = QMTConnector(QMTConfig(mode="legacy"))
         with self.assertRaises(RuntimeError):
@@ -99,17 +109,23 @@ class TestQMTConnector(unittest.TestCase):
 
     def test_missing_xtquant_dependency(self):
         """测试内容：缺少 xtquant 依赖
-        目的：验证构造函数直接报错；
-        输入：移除 sys.modules 中的 xtquant 相关条目并重载模块；
+        目的：验证构造函数在导入失败路径抛异常；
+        输入：用 patch 拦截内建导入，使得任何 'xtquant*' 的导入抛 ImportError；
         预期输出：构造 QMTConnector 时抛 RuntimeError。
         """
-        for k in ["xtquant", "xtquant.xtdatacenter", "xtquant.xtdata"]:
+        # 清理缓存，确保模块重新导入
+        for k in ["xtquant", "xtquant.xtdatacenter", "xtquant.xtdata", "core.qmt_connector"]:
             sys.modules.pop(k, None)
-        if "core.qmt_connector" in sys.modules:
-            del sys.modules["core.qmt_connector"]
-        import core.qmt_connector as qc
-        with self.assertRaises(RuntimeError):
-            qc.QMTConnector(qc.QMTConfig())
+        real_import = __import__
+        def blocked(name, *a, **kw):
+            if name.startswith("xtquant"):
+                raise ImportError("No module named 'xtquant' (blocked by test)")
+            return real_import(name, *a, **kw)
+        with mock.patch("builtins.__import__", side_effect=blocked):
+            import importlib
+            qc = importlib.import_module("core.qmt_connector")
+            with self.assertRaises(RuntimeError):
+                qc.QMTConnector(qc.QMTConfig())
 
     def test_ok_property(self):
         """测试内容：ok 状态位
@@ -118,7 +134,7 @@ class TestQMTConnector(unittest.TestCase):
         预期输出：ok 从 False → True。
         """
         _install_fake_xtquant()
-        _reload_qmt_connector()
+        _reload_qmt_connector_fresh()
         from core.qmt_connector import QMTConnector, QMTConfig
         conn = QMTConnector(QMTConfig(mode="none"))
         self.assertFalse(conn.ok)

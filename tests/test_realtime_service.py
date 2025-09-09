@@ -1,4 +1,9 @@
-"""RealtimeSubscriptionService 单元测试（M2.5 版）
+"""RealtimeSubscriptionService 单元测试（M2.5 版，修订）
+
+修订点：
+    - 修复偶发 AttributeError: module 'xtquant' has no attribute 'xtdata'，在假包安装时把子模块绑定到顶层属性；
+    - 为避免模块缓存导致用旧依赖，reload 改为“先从 sys.modules 移除后再 import”；
+    - 其余逻辑与先前一致。
 
 类说明：
     - 覆盖订阅前预热（preload）、订阅注册、close-only 发布、forming_and_close 发布、幂等去重、异常兜底；
@@ -9,7 +14,6 @@
 """
 import sys
 import types
-import importlib
 import unittest
 from unittest import mock
 from datetime import datetime, timedelta, timezone
@@ -37,13 +41,13 @@ class _FakeCache:
 
 
 def _install_fake_xtdata():
-    """安装假的 xtquant.xtdata：提供 subscribe_quote/get_market_data/run"""
+    """安装假的 xtquant.xtdata，并把子模块挂到顶层 xtquant 属性，避免 AttributeError。"""
     xtquant = types.ModuleType("xtquant")
     xtdata = types.ModuleType("xtquant.xtdata")
 
     def subscribe_quote(stock_code, period, count, callback):
         # 仅记录，测试中不直接触发；_on_event 由测试手动调用
-        pass
+        return None
 
     def run():
         # 不阻塞，供 run_forever 调用
@@ -68,19 +72,20 @@ def _install_fake_xtdata():
     xtdata.run = run
     xtdata.get_market_data = get_market_data
 
+    # 将子模块绑定到顶层属性，便于 mock.patch("xtquant.xtdata.run") 正常定位
+    xtquant.xtdata = xtdata
+
     sys.modules["xtquant"] = xtquant
     sys.modules["xtquant.xtdata"] = xtdata
 
 
-def _reload_realtime():
-    if "core.realtime_service" in sys.modules:
-        importlib.reload(sys.modules["core.realtime_service"])
-    else:
-        import core.realtime_service  # noqa
+def _reload_realtime_fresh():
+    sys.modules.pop("core.realtime_service", None)
+    import core.realtime_service  # noqa
 
 
 class TestRealtimeService(unittest.TestCase):
-    """类说明：实时订阅服务测试（M2.5）
+    """类说明：实时订阅服务测试（M2.5 修订）
     功能：预热、订阅注册、发布逻辑、去重与异常路径。
     上游：无。
     下游：RealtimeSubscriptionService。
@@ -106,7 +111,7 @@ class TestRealtimeService(unittest.TestCase):
         预期输出：cache.calls 按 periods 记录 2 次；subscribe_quote 调用 4 次；run 调用 1 次。
         """
         _install_fake_xtdata()
-        _reload_realtime()
+        _reload_realtime_fresh()
         from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
         cache = _FakeCache()
         pub = _FakePublisher()
@@ -126,17 +131,15 @@ class TestRealtimeService(unittest.TestCase):
         预期输出：第一次 _on_event 发布 1 条 is_closed=True；第二次不再发布（总计仍为 1 条）。
         """
         _install_fake_xtdata()
-        _reload_realtime()
+        _reload_realtime_fresh()
         from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
         pub = _FakePublisher()
         cfg = RealtimeConfig(mode="close_only", periods=["1m"], codes=["000001.SZ"], close_delay_ms=0)
         svc = RealtimeSubscriptionService(cfg, pub)
-        # 第一次事件
         svc._on_event("000001.SZ", "1m")
         self.assertEqual(len(pub.messages), 1)
         self.assertTrue(pub.messages[0]["is_closed"])  # 收盘
         last_ts = pub.messages[0]["bar_end_ts"]
-        # 第二次事件（同一末尾 bar，不应重复发布）
         svc._on_event("000001.SZ", "1m")
         self.assertEqual(len(pub.messages), 1)
         self.assertEqual(svc._last_published[("000001.SZ", "1m")], last_ts)
@@ -148,7 +151,7 @@ class TestRealtimeService(unittest.TestCase):
         预期输出：两条消息，第一条 is_closed=False，第二条 is_closed=True。
         """
         _install_fake_xtdata()
-        _reload_realtime()
+        _reload_realtime_fresh()
         from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
         pub = _FakePublisher()
         cfg = RealtimeConfig(mode="forming_and_close", periods=["1m"], codes=["000001.SZ"], close_delay_ms=0)
@@ -165,7 +168,7 @@ class TestRealtimeService(unittest.TestCase):
         预期输出：不发布任何消息。
         """
         _install_fake_xtdata()
-        _reload_realtime()
+        _reload_realtime_fresh()
         from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
         pub = _FakePublisher()
         cfg = RealtimeConfig(mode="close_only", periods=["1m"], codes=["000001.SZ"], close_delay_ms=0)
@@ -181,7 +184,7 @@ class TestRealtimeService(unittest.TestCase):
         预期输出：cache.calls 为空，subscribe_quote 与 run 仍被调用。
         """
         _install_fake_xtdata()
-        _reload_realtime()
+        _reload_realtime_fresh()
         from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
         cache = _FakeCache()
         pub = _FakePublisher()
