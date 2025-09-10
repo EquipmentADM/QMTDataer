@@ -8,9 +8,11 @@ qmt:
   token: ''
 
 redis:
-  host: 127.0.0.1
+  url: "redis://127.0.0.1:6379/0"  # 优先使用 URL；若提供，会解析为 host/port/password/db
+  host: 127.0.0.1                   # 当未提供 url 时使用
   port: 6379
   password: null
+  db: 0
   topic: xt:topic:bar
 
 subscription:
@@ -30,8 +32,15 @@ logging:
     backup_count: 5
 
 health:
-  enabled: true
+  enabled: false
   key_prefix: xt:bridge:health      # 健康上报 Redis Key 前缀
   interval_sec: 5                   # 上报间隔
   ttl_sec: 20                       # 键过期时间（秒）
   instance_tag: bridge-A            # 可选：实例标识（用于区分多实例）
+
+control:
+  enabled: true
+  channel: xt:ctrl:sub          # 控制通道（订阅/退订/查询）
+  ack_prefix: xt:ctrl:ack       # 回执前缀：xt:ctrl:ack:{strategy_id}
+  registry_prefix: xt:bridge    # 注册表前缀：subs/strategy/... 基于此前缀
+  accept_strategies: []         # 可选白名单（空表示允许任何 strategy_id）

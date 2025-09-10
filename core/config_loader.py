@@ -67,6 +67,27 @@ _ALLOWED_PERIODS = {"1m", "1h", "1d"}
 _ALLOWED_MODES = {"close_only", "forming_and_close"}
 _ALLOWED_QMT_MODES = {"none", "legacy"}
 
+# ----------------- 工具 -----------------
+
+def _parse_redis_url(url: str) -> Dict[str, Any]:
+    """方法说明：解析 redis:// URL
+    功能：返回 host/port/password/db 字段；忽略 scheme 与 query。
+    上游：load_config；
+    下游：RedisSection 构造。
+    """
+    u = urlparse(url)
+    if u.scheme not in ("redis", "rediss"):
+        raise ValueError(f"redis.url 非法 scheme：{u.scheme}")
+    host = u.hostname or "127.0.0.1"
+    port = u.port or 6379
+    password = u.password
+    # path 形如 "/0"
+    try:
+        db = int((u.path or "/0").lstrip("/")) if (u.path or "/0").lstrip("/") else 0
+    except Exception:
+        db = 0
+    return {"host": host, "port": port, "password": password, "db": db}
+
 
 def _env_override(val: Any, env_key: Optional[str]) -> Any:
     """方法说明：支持通过环境变量覆盖配置项
@@ -92,6 +113,8 @@ def load_config(path: str) -> AppConfig:
     redis = raw.get("redis", {})
     sub = raw.get("subscription", {})
     log = raw.get("logging", {})
+    ctl = raw.get("control", {})
+    health = raw.get("health", None)
 
     # QMT
     qmt_sec = QMTSection(
@@ -101,12 +124,27 @@ def load_config(path: str) -> AppConfig:
     if qmt_sec.mode not in _ALLOWED_QMT_MODES:
         raise ValueError(f"qmt.mode 不合法：{qmt_sec.mode}，允许值：{_ALLOWED_QMT_MODES}")
 
-    # Redis
+        # Redis（支持 url 覆盖）
+    url = redis.get("url")
+    if url:
+        parsed = _parse_redis_url(str(url))
+        host = parsed["host"]
+        port = parsed["port"]
+        password = parsed["password"]
+        db = parsed["db"]
+    else:
+        host = str(redis.get("host", "127.0.0.1"))
+        port = int(redis.get("port", 6379))
+        password = redis.get("password", None)
+        db = int(redis.get("db", 0))
+
     redis_sec = RedisSection(
-        host=str(redis.get("host", "127.0.0.1")),
-        port=int(redis.get("port", 6379)),
-        password=redis.get("password", None),
-        topic=str(redis.get("topic", "xt:topic:bar")),
+        url = url,
+        host = host,
+        port = port,
+        password = password,
+        db = db,
+        topic = str(redis.get("topic", "xt:topic:bar")),
     )
 
     # Subscription
@@ -138,6 +176,15 @@ def load_config(path: str) -> AppConfig:
         level=str(log.get("level", "INFO")).upper(),
         json=bool(log.get("json", False)),
         file=log.get("file", None),
+        rotate=log.get("rotate", None),
+    )
+
+    ctl_sec = ControlSection(
+        enabled=bool(ctl.get("enabled", False)),
+        channel=str(ctl.get("channel", "xt:ctrl:sub")),
+        ack_prefix=str(ctl.get("ack_prefix", "xt:ctrl:ack")),
+        registry_prefix=str(ctl.get("registry_prefix", "xt:bridge")),
+        accept_strategies=[str(x) for x in (ctl.get("accept_strategies") or [])],
     )
 
     return AppConfig(qmt=qmt_sec, redis=redis_sec, subscription=sub_sec, logging=log_sec)
