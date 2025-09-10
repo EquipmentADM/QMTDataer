@@ -81,22 +81,15 @@ def main() -> None:
     # 健康上报（可选）
     health_thr = None
     try:
-        health_cfg = getattr(cfg, "health", None)
-        if health_cfg and getattr(health_cfg, "enabled", False):
-            extra = {
-                "codes": cfg.subscription.codes,
-                "periods": cfg.subscription.periods,
-                "mode": cfg.subscription.mode,
-                "topic": cfg.redis.topic,
-                "instance_tag": getattr(health_cfg, "instance_tag", None),
-            }
-            health_thr = HealthReporter(host=cfg.redis.host, port=cfg.redis.port,
-                                        password=cfg.redis.password,
-                                        key_prefix=getattr(health_cfg, "key_prefix", "xt:bridge:health"),
-                                        metrics=metrics,
-                                        interval_sec=int(getattr(health_cfg, "interval_sec", 5)),
-                                        ttl_sec=int(getattr(health_cfg, "ttl_sec", 20)),
-                                        extra_info=extra)
+        health_cfg = getattr(cfg, "health", None) or {}
+        if isinstance(health_cfg, dict) and health_cfg.get("enabled"):
+            health_thr = HealthReporter(host = cfg.redis.host, port = cfg.redis.port,
+                                        password = cfg.redis.password,
+                                        key_prefix = health_cfg.get("key_prefix", "xt:bridge:health"),
+                                        metrics = metrics,
+                                        interval_sec = int(health_cfg.get("interval_sec", 5)),
+                                        ttl_sec = int(health_cfg.get("ttl_sec", 20)),
+                                        extra_info = extra)
             health_thr.start()
             logging.info("[BOOT] health reporter started")
     except Exception as e:

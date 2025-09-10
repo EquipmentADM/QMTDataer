@@ -3,14 +3,12 @@
 # @Author : EquipmentADV
 # @File : health.py
 # @Software : PyCharm
+# -*- coding: utf-8 -*-
 """健康上报（M3）
-
 类说明：
     - HealthReporter：后台线程，定期将 Metrics 快照与实例信息写入 Redis（带 TTL）。
-
 功能：
     - 供运维与可视化读取当前实例的存活与吞吐指标；
-
 上下游：
     - 上游：run_with_config（实例化并启动）；
     - 下游：Redis（写入字符串或哈希，当前实现为字符串 JSON）。
@@ -47,7 +45,8 @@ class HealthReporter(threading.Thread):
         self.interval = max(1, int(interval_sec))
         self.ttl = max(self.interval * 2, int(ttl_sec))
         self.extra = extra_info or {}
-        self._stop = threading.Event()
+        # 修复：不要覆盖 Thread._stop
+        self._stop_evt = threading.Event()
         self._instance_id = self._make_instance_id()
 
     def _make_instance_id(self) -> str:
@@ -58,10 +57,10 @@ class HealthReporter(threading.Thread):
 
     def stop(self) -> None:
         """方法说明：停止健康上报"""
-        self._stop.set()
+        self._stop_evt.set()
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_evt.is_set():
             payload = {
                 "ts": int(time.time()),
                 "instance_id": self._instance_id,
@@ -74,4 +73,5 @@ class HealthReporter(threading.Thread):
             except Exception:
                 # 健康上报失败不应中断主流程，仅忽略
                 pass
-            self._stop.wait(self.interval)
+            # 用事件等待可即时响应 stop()
+            self._stop_evt.wait(self.interval)
