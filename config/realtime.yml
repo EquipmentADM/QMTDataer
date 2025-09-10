@@ -1,0 +1,30 @@
+# 说明：
+#   - 单进程承载所有订阅；
+#   - 支持通过 YAML 配置订阅集合、预热、推送目标与 QMT 连接模式；
+#   - 若不修改，可直接用于 scripts/run_with_config.py 的 --config 参数。
+
+qmt:
+  mode: none           # none|legacy；默认 none，不调用 xtdatacenter.listen
+  token: ''            # legacy 模式可选
+
+redis:
+  host: 127.0.0.1
+  port: 6379
+  password: null
+  topic: xt:topic:bar  # Redis PubSub 主题
+
+subscription:
+  codes:               # 标的代码列表
+    - 518880.SH
+    - 513880.SH
+  periods:             # 周期列表，仅支持 1m/1h/1d
+    - 1m
+    - 1d
+  mode: close_only     # close_only | forming_and_close
+  close_delay_ms: 100  # 收盘判定延迟（毫秒）
+  preload_days: 3      # 订阅前预热补齐天数（0 关闭）
+
+logging:
+  level: INFO          # DEBUG/INFO/WARNING/ERROR
+  json: false          # 是否 JSON 日志（简单实现：false=标准日志）
+  file: null           # 可选：输出到文件路径；null=仅控制台

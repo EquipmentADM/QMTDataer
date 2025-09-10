@@ -3,57 +3,66 @@
 # @Author : EquipmentADV
 # @File : pubsub_publisher.py
 # @Software : PyCharm
-"""
-PubSubPublisher：Redis PubSub 发布器
+"""Redis PubSub 发布器（M3）
 
 类说明：
-    - 功能：将标准化 bar 消息（宽表 JSON）发布至 Redis PubSub；提供超时、重试与指标打点（留钩子）。
-    - 上游：RealtimeSubscriptionService（实时订阅聚合侧）。
-    - 下游：策略管理器 / 本地数据库消费端（通过 PubSub 订阅）。
+    - PubSubPublisher：将字典消息序列化为 JSON，并发布到 Redis PubSub 主题；
+
+功能：
+    - 支持重试；中文字符不转义；集成最小指标；
+
+上下游：
+    - 上游：RealtimeSubscriptionService；
+    - 下游：Redis PubSub。
 """
 from __future__ import annotations
 import json
 from typing import Optional, Dict, Any
+import time
 import logging
 
 try:
     import redis
 except Exception as e:  # pragma: no cover
     redis = None  # type: ignore
-    _REDIS_ERR = e
+    _IMPORT_ERR = e
 else:
-    _REDIS_ERR = None
+    _IMPORT_ERR = None
+
+from .metrics import Metrics
 
 
 class PubSubPublisher:
-    """类说明：Redis PubSub 发布器（JSON 序列化）
-    功能：负责将消息发布至指定 topic；支持简单重试；
+    """类说明：Redis PubSub 发布器
+    功能：提供 publish(dict) → Redis PubSub；失败自动重试；统计指标。
     上游：RealtimeSubscriptionService。
-    下游：策略/DB 消费端。
+    下游：Redis。
     """
-
     def __init__(self, host: str = "127.0.0.1", port: int = 6379, password: Optional[str] = None,
-                 topic: str = "xt:topic:bar", serializer: str = "json",
+                 topic: str = "xt:topic:bar", metrics: Optional[Metrics] = None,
                  logger: Optional[logging.Logger] = None) -> None:
-        if _REDIS_ERR is not None:
-            raise RuntimeError(f"未能导入 redis-py：{_REDIS_ERR}. 请先 pip install redis")
-        self.logger = logger or logging.getLogger(__name__)
+        if _IMPORT_ERR is not None:
+            raise RuntimeError(f"未能导入 redis：{_IMPORT_ERR}")
+        self._cli = redis.Redis(host=host, port=port, password=password, decode_responses=True)
         self.topic = topic
-        self.serializer = serializer
-        self.cli = redis.Redis(host=host, port=port, password=password, decode_responses=True)
+        self.metrics = metrics or Metrics()
+        self.logger = logger or logging.getLogger(__name__)
 
-    def publish(self, message: Dict[str, Any], max_retries: int = 3) -> None:
-        """方法说明：发布单条消息到 Redis PubSub
-        功能：将字典转为 JSON 并发布至 topic；失败自动重试。
+    def publish(self, payload: Dict[str, Any], max_retries: int = 3, backoff_ms: int = 100) -> None:
+        """方法说明：发布一条消息
+        功能：JSON 序列化并发布至 PubSub；失败重试。
         上游：RealtimeSubscriptionService。
-        下游：Redis PubSub 渠道。
+        下游：Redis PubSub。
         """
-        payload = json.dumps(message, ensure_ascii=False)
+        data = json.dumps(payload, ensure_ascii=False)
         for i in range(max_retries):
             try:
-                self.cli.publish(self.topic, payload)
-                # 指标钩子：可在此处记录发布耗时/成功计数
+                self._cli.publish(self.topic, data)
+                self.metrics.inc_published()
                 return
             except Exception as e:  # pragma: no cover
-                self.logger.warning("[PubSubPublisher] 发布失败，重试=%d, err=%s", i + 1, e)
-        raise RuntimeError("PubSubPublisher: 达到最大重试次数仍失败")
+                self.metrics.inc_publish_fail()
+                if i == max_retries - 1:
+                    self.logger.error("[PubSubPublisher] 发布失败（耗尽重试）：%s", e)
+                    raise RuntimeError(f"publish failed: {e}")
+                time.sleep(backoff_ms / 1000.0)
