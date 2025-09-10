@@ -4,27 +4,34 @@
 #   - 若不修改，可直接用于 scripts/run_with_config.py 的 --config 参数。
 
 qmt:
-  mode: none           # none|legacy；默认 none，不调用 xtdatacenter.listen
-  token: ''            # legacy 模式可选
+  mode: none
+  token: ''
 
 redis:
   host: 127.0.0.1
   port: 6379
   password: null
-  topic: xt:topic:bar  # Redis PubSub 主题
+  topic: xt:topic:bar
 
 subscription:
-  codes:               # 标的代码列表
-    - 518880.SH
-    - 513880.SH
-  periods:             # 周期列表，仅支持 1m/1h/1d
-    - 1m
-    - 1d
-  mode: close_only     # close_only | forming_and_close
-  close_delay_ms: 100  # 收盘判定延迟（毫秒）
-  preload_days: 3      # 订阅前预热补齐天数（0 关闭）
+  codes: [518880.SH, 513880.SH]
+  periods: [1m, 1d]
+  mode: close_only
+  close_delay_ms: 100
+  preload_days: 3
 
 logging:
-  level: INFO          # DEBUG/INFO/WARNING/ERROR
-  json: false          # 是否 JSON 日志（简单实现：false=标准日志）
-  file: null           # 可选：输出到文件路径；null=仅控制台
+  level: INFO
+  json: false
+  file: logs/realtime_bridge.log     # 建议开启文件输出，便于轮转
+  rotate:
+    enabled: true
+    max_bytes: 10485760             # 10MB
+    backup_count: 5
+
+health:
+  enabled: true
+  key_prefix: xt:bridge:health      # 健康上报 Redis Key 前缀
+  interval_sec: 5                   # 上报间隔
+  ttl_sec: 20                       # 键过期时间（秒）
+  instance_tag: bridge-A            # 可选：实例标识（用于区分多实例）

@@ -24,6 +24,8 @@ from core.qmt_connector import QMTConnector, QMTConfig
 from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
 from core.pubsub_publisher import PubSubPublisher
 from core.metrics import Metrics
+from core.logging_utils import setup_logging
+from core.health import HealthReporter
 
 
 def _setup_logging(level: str = "INFO", to_file: str | None = None) -> None:
@@ -50,6 +52,16 @@ def main() -> None:
 
     cfg = load_config(args.config)
     _setup_logging(cfg.logging.level, cfg.logging.file)
+    setup_logging(level = cfg.logging.level,
+                  to_file = cfg.logging.file,
+                  json_mode = bool(cfg.logging.json),
+                  rotate_enabled = bool(
+                      getattr(cfg.logging, "rotate", None) and cfg.logging.rotate.get("enabled", False)) if hasattr(
+                      cfg.logging, "rotate") else False,
+                  max_bytes = (cfg.logging.rotate.get("max_bytes", 10 * 1024 * 1024) if hasattr(cfg.logging,
+                                                                                                "rotate") and cfg.logging.rotate else 10 * 1024 * 1024),
+                  backup_count = (cfg.logging.rotate.get("backup_count", 5) if hasattr(cfg.logging,
+                                                                                       "rotate") and cfg.logging.rotate else 5))
 
     logging.info("[BOOT] load config ok: codes=%d periods=%d mode=%s topic=%s",
                  len(cfg.subscription.codes), len(cfg.subscription.periods),
@@ -65,6 +77,30 @@ def main() -> None:
     publisher = PubSubPublisher(host=cfg.redis.host, port=cfg.redis.port,
                                 password=cfg.redis.password, topic=cfg.redis.topic,
                                 metrics=metrics)
+
+    # 健康上报（可选）
+    health_thr = None
+    try:
+        health_cfg = getattr(cfg, "health", None)
+        if health_cfg and getattr(health_cfg, "enabled", False):
+            extra = {
+                "codes": cfg.subscription.codes,
+                "periods": cfg.subscription.periods,
+                "mode": cfg.subscription.mode,
+                "topic": cfg.redis.topic,
+                "instance_tag": getattr(health_cfg, "instance_tag", None),
+            }
+            health_thr = HealthReporter(host=cfg.redis.host, port=cfg.redis.port,
+                                        password=cfg.redis.password,
+                                        key_prefix=getattr(health_cfg, "key_prefix", "xt:bridge:health"),
+                                        metrics=metrics,
+                                        interval_sec=int(getattr(health_cfg, "interval_sec", 5)),
+                                        ttl_sec=int(getattr(health_cfg, "ttl_sec", 20)),
+                                        extra_info=extra)
+            health_thr.start()
+            logging.info("[BOOT] health reporter started")
+    except Exception as e:
+        logging.warning("[BOOT] health reporter disabled: %s", e)
 
     # 实时服务
     rt_cfg = RealtimeConfig(mode=cfg.subscription.mode,
