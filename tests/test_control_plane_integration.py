@@ -58,7 +58,9 @@ class TestControlPlaneIntegration(unittest.TestCase):
         self.ack_ch = f"{self.ack_prefix}:{self.strategy}"
         self.ps = self.cli.pubsub()
         self.ps.subscribe(self.ack_ch)
-        while self.ps.get_message(timeout=0.01):
+        # 为避免命名不一致，增加别名
+        self.pubsub = self.ps
+        while self.ps.get_message(timeout = 0.01):
             pass
         self.svc = _FakeService()
         self.cp = ControlPlane(host=p["host"], port=p["port"], password=p["password"], db=p["db"],
@@ -80,17 +82,24 @@ class TestControlPlaneIntegration(unittest.TestCase):
         except Exception:
             pass
 
-    def _await_ack(self, timeout=3.0):
+    def _await_ack(self, timeout=2.0):
+        """测试辅助：等待 ACK，一直等到超时；兼容 bytes/str 的 data。"""
         t0 = time.time()
         while time.time() - t0 < timeout:
-            m = self.ps.get_message(ignore_subscribe_messages=True, timeout=0.2)
+            m = self.ps.get_message(ignore_subscribe_messages = True, timeout = 0.2)
             if not m:
                 continue
-            try:
-                data = json.loads(m.get("data", "{}"))
-                return data
-            except Exception:
-                continue
+            data = m.get("data")
+            if isinstance(data, bytes):  # 兼容 bytes
+                try:
+                    data = data.decode("utf-8", errors = "ignore")
+                except Exception:
+                    continue
+            if isinstance(data, str):
+                try:
+                    return json.loads(data)
+                except Exception:
+                    continue
         return None
 
     def test_subscribe_status_unsubscribe(self):

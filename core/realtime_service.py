@@ -84,6 +84,7 @@ class RealtimeSubscriptionService:
         :param cache: 可选的历史预热实现（需提供 ensure_downloaded_date_range(codes, periods, days)）
         :param logger: 可选日志器
         """
+
         self.cfg = cfg
         self.publisher = publisher
         self.cache = cache
@@ -199,6 +200,7 @@ class RealtimeSubscriptionService:
             - 遍历 datas 中每个代码的若干条 data；
             - 规范化为“宽表” payload；
             - 根据模式/去重策略决定是否发布；
+        在 forming_and_close 模式下，允许同一根 K 既发布 forming(false) 又发布 close(true)，因此去重键需包含 is_closed 维度；close_only 模式保持原有三元键。
         """
         if not datas:
             return
@@ -210,7 +212,13 @@ class RealtimeSubscriptionService:
                 payload = self._build_payload_from_row(code, period, row)
 
                 # 去重键：code + period + bar_end_ts（bar_end_ts 缺失则无法去重，直接跳过或直接推送）
-                dkey = (payload.get("code"), payload.get("period"), payload.get("bar_end_ts"))
+                # dkey = (payload.get("code"), payload.get("period"), payload.get("bar_end_ts"))
+                is_closed = payload.get("is_closed")
+                if self.cfg.mode == "forming_and_close":
+                    dkey = (payload.get("code"), payload.get("period"), payload.get("bar_end_ts"),
+                            1 if is_closed else 0)
+                else:
+                    dkey = (payload.get("code"), payload.get("period"), payload.get("bar_end_ts"))
 
                 # 模式过滤
                 if self.cfg.mode == "close_only":

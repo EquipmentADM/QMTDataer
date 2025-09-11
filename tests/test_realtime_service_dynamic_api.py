@@ -8,6 +8,7 @@
    预期输出：subscribe 被调用 2 次；remove 后调用 2 次，内部订阅集变化正确
 """
 import unittest
+from unittest import mock
 
 from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
 
@@ -49,9 +50,13 @@ class TestRealtimeDynamic(unittest.TestCase):
         mod.xtdata = self.fake
 
     def test_add_and_remove(self):
-        cfg = RealtimeConfig(mode="close_only", periods=["1m", "1d"], codes=["A"], preload_days=0)
-        svc = RealtimeSubscriptionService(cfg, _NoopPublisher(), cache=_NoopCache())
-        svc.add_subscription(["A"], ["1m", "1d"], preload_days=0)
-        self.assertEqual(len(self.fake.sub_calls), 2)
+        from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
+        fake = _FakeXtData()
+        svc = RealtimeSubscriptionService(
+            RealtimeConfig(mode = "close_only", periods = ["1m", "1d"], codes = ["A"], preload_days = 0),
+            _NoopPublisher(), cache = _NoopCache()  # 关键：注入假 xt
+        )
+        svc.add_subscription(["A"], ["1m", "1d"], preload_days = 0)
+        self.assertEqual(len(fake.sub_calls), 2)
         svc.remove_subscription(["A"], ["1m", "1d"])
-        self.assertEqual(len(self.fake.unsub_calls), 2)
+        self.assertEqual(len(fake.unsub_calls), 2)

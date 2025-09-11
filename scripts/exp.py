@@ -24,12 +24,12 @@ code_list  = [
 # 设定获取数据的周期
 period = "1d"
 
-# for stock in code_list:
-#     xtdata.download_history_data(stock,
-#                                  period=period,
-#                                  start_time='',
-#                                  end_time='',
-#                                  incrementally=True)
+for stock in code_list:
+    xtdata.download_history_data(stock,
+                                 period=period,
+                                 start_time='',
+                                 end_time='',
+                                 incrementally=True)
 
 get_market_data_in = xtdata.get_market_data(field_list = ['time', 'open','volume'],
                                             stock_list = code_list,

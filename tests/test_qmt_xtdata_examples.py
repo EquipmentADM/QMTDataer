@@ -29,6 +29,10 @@ class TestQmtXtDataExamples(unittest.TestCase):
         输入：两只标的、1d、近 15 天
         预期输出：返回 dict 且包含关键字段
         """
+        import os
+        if not os.getenv("RUN_QMT_HISTORY_TEST"):
+            self.skipTest("未设置 RUN_QMT_HISTORY_TEST=1，跳过真实 QMT 历史接口测试")
+
         codes = ["518880.SH", "513880.SH"]
         period = "1d"
         end = dt.date.today()

@@ -85,6 +85,7 @@ class HistoryAPI:
         self.cache.ensure_downloaded_date_range(codes, period, start_yyyymmdd, end_yyyymmdd, incrementally=True)
 
         # 3) 批量获取（field→DataFrame 字典）
+        print(f"调用xtdata.get_market_data-stock_list:{codes} period:{period} start_time:{start_yyyymmdd} end_time:{end_yyyymmdd} dividend_type:{dividend_type}")
         data_dict = xtdata.get_market_data(
             field_list=[],
             stock_list=codes,

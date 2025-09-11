@@ -35,9 +35,10 @@ class _FakePublisher:
 class _FakeCache:
     """简易 LocalCache：记录 ensure_downloaded 调用"""
     def __init__(self):
-        self.calls = []
-    def ensure_downloaded_date_range(self, codes, period, s, e, incrementally=True):
-        self.calls.append((tuple(codes), period, s, e, incrementally))
+        self.calls = []  # 记录调用参数
+    def ensure_downloaded_date_range(self, codes, periods, days: int):
+        """模拟新版签名：三参（codes, periods, days）"""
+        self.calls.append((tuple(codes), tuple(periods), days))
 
 
 def _install_fake_xtdata():
@@ -120,61 +121,66 @@ class TestRealtimeService(unittest.TestCase):
         with mock.patch("xtquant.xtdata.run") as mrun, mock.patch("xtquant.xtdata.subscribe_quote") as msub:
             svc.run_forever()
             # 预热按 period 调用 2 次（codes 作为整体传入）
-            self.assertEqual(len(cache.calls), 2)
+            self.assertEqual(len(cache.calls), 1)
             self.assertEqual(msub.call_count, 4)
             self.assertEqual(mrun.call_count, 1)
+            codes_called, periods_called, days = cache.calls[0]
+            self.assertEqual(set(codes_called), {"000001.SZ", "600000.SH"})
+            self.assertEqual(set(periods_called), {"1m", "1d"})
+            self.assertEqual(days, 3)
 
     def test_close_only_publish_and_idempotent(self):
         """测试内容：close-only 模式发布 + 幂等去重
-        目的：事件回调触发一次发布，再触发不应重复发布；
-        输入：get_market_data 返回两根已收盘的 1m K；close_delay_ms=0；
-        预期输出：第一次 _on_event 发布 1 条 is_closed=True；第二次不再发布（总计仍为 1 条）。
+        目的：callback(datas) 推送一条收敛 K；第二次相同 bar 不再重复发布。
+        输入：datas 含同一根 K 两次；期望仅发布 1 条 is_closed=True。
+        预期：len(pub.messages)=1。
         """
-        _install_fake_xtdata()
         _reload_realtime_fresh()
         from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
         pub = _FakePublisher()
-        cfg = RealtimeConfig(mode="close_only", periods=["1m"], codes=["000001.SZ"], close_delay_ms=0)
+        cfg = RealtimeConfig(mode = "close_only", periods = ["1m"], codes = ["000001.SZ"], close_delay_ms = 0)
         svc = RealtimeSubscriptionService(cfg, pub)
-        svc._on_event("000001.SZ", "1m")
+
+        datas = {
+            "000001.SZ": [
+                {"time": "20250101 09:31:00", "open": 1, "high": 2, "low": 1, "close": 1.5, "isClosed": True}
+            ]
+        }
+        svc._on_datas("1m", datas)
         self.assertEqual(len(pub.messages), 1)
-        self.assertTrue(pub.messages[0]["is_closed"])  # 收盘
-        last_ts = pub.messages[0]["bar_end_ts"]
-        svc._on_event("000001.SZ", "1m")
-        self.assertEqual(len(pub.messages), 1)
-        self.assertEqual(svc._last_published[("000001.SZ", "1m")], last_ts)
+        self.assertTrue(pub.messages[0]["is_closed"])
+
+        # 再次推送同一条，触发去重
+        svc._on_datas("1m", datas)
+        self.assertEqual(len(pub.messages), 1)  # 不增加
 
     def test_forming_and_close_dual_publish(self):
         """测试内容：forming_and_close 模式双发布
-        目的：先发布 forming（is_closed=False），再发布 close（is_closed=True）；
-        输入：close_delay_ms=0；get_market_data 返回最后一根已到时；
-        预期输出：两条消息，第一条 is_closed=False，第二条 is_closed=True。
+        目的：同一根 K 先推 forming(false) 再推 close(true)。
         """
-        _install_fake_xtdata()
         _reload_realtime_fresh()
         from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
         pub = _FakePublisher()
-        cfg = RealtimeConfig(mode="forming_and_close", periods=["1m"], codes=["000001.SZ"], close_delay_ms=0)
+        cfg = RealtimeConfig(mode = "forming_and_close", periods = ["1m"], codes = ["000001.SZ"], close_delay_ms = 0)
         svc = RealtimeSubscriptionService(cfg, pub)
-        svc._on_event("000001.SZ", "1m")
+
+        svc._on_datas("1m", {"000001.SZ": [{"time": "20250101 09:31:00", "close": 1.1, "isClosed": False}]})
+        svc._on_datas("1m", {"000001.SZ": [{"time": "20250101 09:31:00", "close": 1.2, "isClosed": True}]})
         self.assertEqual(len(pub.messages), 2)
-        self.assertFalse(pub.messages[0]["is_closed"])  # forming
-        self.assertTrue(pub.messages[1]["is_closed"])   # close
+        self.assertFalse(pub.messages[0]["is_closed"])
+        self.assertTrue(pub.messages[1]["is_closed"])
 
     def test_get_market_data_exception(self):
-        """测试内容：拉取异常时不崩溃
-        目的：保障回调健壮性；
-        输入：get_market_data 抛异常；
-        预期输出：不发布任何消息。
+        """测试内容：模拟回调异常时不崩溃
+        目的：构造非法 datas，保证不抛例外、不发布。
         """
-        _install_fake_xtdata()
         _reload_realtime_fresh()
         from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
         pub = _FakePublisher()
-        cfg = RealtimeConfig(mode="close_only", periods=["1m"], codes=["000001.SZ"], close_delay_ms=0)
-        svc = RealtimeSubscriptionService(cfg, pub)
-        with mock.patch("xtquant.xtdata.get_market_data", side_effect=RuntimeError("boom")):
-            svc._on_event("000001.SZ", "1m")
+        svc = RealtimeSubscriptionService(RealtimeConfig(), pub)
+
+        # 非法 datas（不是 dict 或结构不符）
+        svc._on_datas("1m", None)
         self.assertEqual(len(pub.messages), 0)
 
     def test_preload_days_zero_disable_cache(self):

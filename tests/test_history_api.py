@@ -14,37 +14,41 @@ from unittest import mock
 import pandas as pd
 
 
-def _install_fake_xtdata_for_history(rows: int = 10, col_time: str = "time"):
-    """安装假的 xtdata.get_market_data 供 HistoryAPI 使用，返回固定行数的 DataFrame。
-    :param rows: 返回的行数
-    :param col_time: 时间列名称（time/Time/datetime/bar_time）
-    """
-    xtquant = types.ModuleType("xtquant")
-    xtdata = types.ModuleType("xtquant.xtdata")
+def _install_fake_xtdata_for_history(rows=10, col_time="time"):
+    """安装历史用的假 xtdata：为 history_api 与 local_cache 同时打桩。"""
+    import types
+    fake_xt = types.SimpleNamespace()
 
-    def get_market_data(stock_code: str, period: str, start_time=None, end_time=None, dividend_type="none", fill_data=True, count=None):
-        # 构造 rows 条数据，时间从 end_time 开始每周期 1 步
-        tz = timezone(timedelta(hours=8))
-        if end_time:
-            dt_end = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz)
-        else:
-            dt_end = datetime(2025, 1, 1, 10, 0, tzinfo=tz)
-        delta = {"1m": timedelta(minutes=1), "1h": timedelta(hours=1), "1d": timedelta(days=1)}[period]
-        times = [dt_end - i * delta for i in range(rows)][::-1]
-        df = pd.DataFrame({
-            col_time: [t.strftime("%Y-%m-%d %H:%M:%S") for t in times],
-            "open": [1.0] * rows,
-            "high": [2.0] * rows,
-            "low": [0.5] * rows,
-            "close": [1.5] * rows,
-            "volume": [100.0] * rows,
-            "amount": [1000.0] * rows,
-        })
-        return df
+    # download_history_data：LocalCache 用
+    def _download_history_data(stock_code, period, start_time="", end_time="", incrementally=True):
+        # 直接返回 True，表示“已下载”
+        return True
+    fake_xt.download_history_data = _download_history_data
 
-    xtdata.get_market_data = get_market_data
-    sys.modules["xtquant"] = xtquant
-    sys.modules["xtquant.xtdata"] = xtdata
+    # get_market_data_ex：HistoryAPI 用（返回最小结构）
+    def _get_ex(field_list, stock_list, period, start_time, end_time,
+                count=-1, dividend_type="none", fill_data=False, subscribe=False):
+        # 构造一个“宽字典”：每只股票 -> 每个字段 -> 简易 DataFrame-like
+        import pandas as pd
+        idx = pd.Index([f"R{i}" for i in range(rows)], name="row")
+        data = {}
+        for code in stock_list:
+            d = {}
+            # 时间列
+            if not field_list or "time" in field_list:
+                d["time"] = pd.DataFrame({start_time: [0]*1}).T  # 仅断言需要 shape 即可
+            for f in ["open","high","low","close","volume","amount","preClose"]:
+                if (not field_list) or (f in field_list):
+                    d[f] = pd.DataFrame({f"col{i}": [i] for i in range(rows)}, index=idx)
+            data[code] = d
+        return data
+    fake_xt.get_market_data_ex = _get_ex
+
+    # 打补丁到两个模块
+    import core.history_api as hmod
+    import core.local_cache as lmod
+    hmod.xtdata = fake_xt
+    lmod.xtdata = fake_xt
 
 
 def _reload_history_api():
@@ -70,10 +74,11 @@ class TestHistoryAPI(unittest.TestCase):
         _install_fake_xtdata_for_history(rows=10, col_time="time")
         _reload_history_api()
         from core.history_api import HistoryAPI, HistoryConfig
-        api = HistoryAPI(HistoryConfig(batch_size=3000))
+        api = HistoryAPI(HistoryConfig())
         res = api.fetch_bars([
-            "000001.SZ"
+            "510050.SH"
         ], "1m", "2025-01-01T09:30:00+08:00", "2025-01-01T09:40:00+08:00", return_data=False)
+        print(f"res:{res}")
         self.assertEqual(res["status"], "ok")
         self.assertEqual(res["count"], 10)
         self.assertIsNotNone(res["head_ts"]) ; self.assertIsNotNone(res["tail_ts"]) 
@@ -89,7 +94,7 @@ class TestHistoryAPI(unittest.TestCase):
             _install_fake_xtdata_for_history(rows=3, col_time=col)
             _reload_history_api()
             from core.history_api import HistoryAPI, HistoryConfig
-            api = HistoryAPI(HistoryConfig(batch_size=10))
+            api = HistoryAPI(HistoryConfig())
             res = api.fetch_bars(["000001.SZ"], "1h", "2025-01-01T09:00:00+08:00", "2025-01-01T15:00:00+08:00", return_data=True)
             self.assertGreater(res["count"], 0)
             self.assertTrue(all("bar_end_ts" in r for r in res["data"]))
@@ -103,8 +108,8 @@ class TestHistoryAPI(unittest.TestCase):
         _install_fake_xtdata_for_history(rows=3)
         _reload_history_api()
         from core.history_api import HistoryAPI, HistoryConfig
-        api = HistoryAPI(HistoryConfig(batch_size=3000))
-        res = api.fetch_bars(["000001.SZ"], "1m", "2025-01-01T09:30:00+08:00", "2025-01-01T09:35:00+08:00", return_data=True)
+        api = HistoryAPI(HistoryConfig())
+        res = api.fetch_bars(["510050.SH"], "1m", "2025-01-01T09:30:00+08:00", "2025-01-01T09:35:00+08:00", return_data=True)
         expected_total = 5
         self.assertEqual(res["count"], 3)
         self.assertEqual(len(res["gaps"]), expected_total - 3)

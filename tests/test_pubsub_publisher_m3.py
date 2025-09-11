@@ -7,7 +7,7 @@ import sys
 import types
 import importlib
 import unittest
-
+from unittest import mock
 
 def _install_fake_redis(publish_side_effect=None):
     """安装假的 redis.Redis 到 sys.modules，允许设置 publish 的副作用。"""
