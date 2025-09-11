@@ -1,177 +1,353 @@
-# -*- codeing = utf-8 -*-
-# @Time : 2025/9/9 15:12
-# @Author : EquipmentADV
-# @File : realtime_service.py
-# @Software : PyCharm
-"""RealtimeSubscriptionService：实时订阅/发布（订阅前补齐）
-
-类说明：
-    - 功能：
-        1) 启动时对 codes×periods 做一次**历史预热补齐**（preload_days 配置）；
-        2) 订阅回调后拉取最近 2 根，按 close-delay 规则发布至 Redis PubSub；
-    - 上游：运行脚本 run_realtime_bridge.py；
-    - 下游：MiniQMT（缓存）与 Redis PubSub。
+# -*- coding: utf-8 -*-
 """
-from __future__ import annotations
-from dataclasses import dataclass
-from typing import List, Dict, Tuple, Optional
-from datetime import datetime, timedelta, timezone
-import logging
+实时订阅服务（M3 / M3.5）
 
+文件说明（功能 / 特性 / 上下游）：
+- 功能：
+    * 统一封装 QMT xtdata 的实时订阅能力；
+    * 接收 QMT 回调数据（callback(datas)），将其规范化为“宽表”后发布到 Redis（通过外部 Publisher）；
+    * 支持启动或动态新增订阅时的历史预热（补齐），以保证首条实时推送的连续性；
+    * 支持去重与两种推送模式：'close_only'（默认，仅收盘推送）、'forming_and_close'（生成中也推）；
+    * 提供状态查询（当前订阅集 / 最近发布时间等）；
+- 特性：
+    * 回调签名完全遵循 QMT 官方：callback(datas)，datas 形如 { '600000.SH': [ {...}, ... ] }；
+    * 订阅调用使用关键字参数（避免回调被编码进 BSON 的问题）；
+    * 去重键采用 (code, period, bar_end_ts)，内部 LRU 控制内存增长；
+    * 并发安全：回调在 xtdata 内部线程触发，本类用锁保护关键结构（订阅集 / 去重集）；
+- 上下游：
+    * 上游：运行入口（scripts/run_with_config.py）及 ControlPlane（动态订阅 / 退订）；
+    * 下游：PubSubPublisher（将标准化“宽表”消息发布到 Redis）。
+
+注意：
+- QMT/MiniQMT 的历史数据获取通常需要先 download_history_data，再通过 get_* 读取；本服务中的“预热”步骤会在新增订阅时按配置进行补齐；
+- 实时回调的数据字段（尤其时间与收盘标记）在不同品种/站点可能存在差异，此处做了通用容错（例如 isClose/isClosed/closed 多字段容错）。
+"""
+
+from __future__ import annotations
+import logging
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Tuple, Optional
+from collections import deque
+from datetime import datetime, timedelta
+
+# QMT xtdata
 try:
     from xtquant import xtdata
-except Exception:  # pragma: no cover
-    xtdata = None  # type: ignore
+except Exception as _e:  # pragma: no cover
+    raise RuntimeError(f"缺少依赖或 QMT/MiniQMT 未正确安装：{_e}")
 
-from .metrics import Metrics
 
-CN_TZ = timezone(timedelta(hours=8))
-
+# =========================
+# 配置数据类
+# =========================
 
 @dataclass
 class RealtimeConfig:
     """类说明：实时订阅配置
-    功能：定义订阅模式、周期集、标的集、收盘延迟与预热天数；
-    上下游：由配置加载或控制面转换后传入。
+    功能：描述订阅行为（模式 / 周期 / 标的 / 预热等）。
+    上下游：由外部加载（config_loader）并传入 RealtimeSubscriptionService。
     """
-    mode: str  # close_only | forming_and_close
-    periods: List[str]
-    codes: List[str]
-    close_delay_ms: int = 100
-    preload_days: int = 3
+    mode: str = "close_only"                     # 'close_only' | 'forming_and_close'
+    periods: List[str] = field(default_factory=lambda: ["1m"])
+    codes: List[str] = field(default_factory=list)
+    close_delay_ms: int = 100                    # 若做延迟收盘判定（当前版本未启用队列延迟，仅保留配置）
+    preload_days: int = 3                        # 新增订阅时历史预热天数（0 表示不预热）
 
+    # 可选：去重容量限制（LRU）
+    dedup_max_size: int = 50000
+
+
+# =========================
+# 主服务类
+# =========================
 
 class RealtimeSubscriptionService:
     """类说明：实时订阅服务
-    功能：负责订阅/回调→拉取→整形→发布；支持动态增删订阅；
-    上游：run_with_config / control_plane；
-    下游：Redis（通过 PubSubPublisher）。
+    功能：
+        - 在 xtdata 中注册订阅（subscribe_quote），使用官方签名的回调 callback(datas) 接收行情；
+        - 将回调数据规范化为“宽表”并通过 Publisher 推送到 Redis；
+        - 在新增订阅时可先进行历史预热，确保时序连续；
+        - 提供订阅状态查询；
+    上游：
+        - run_with_config.py 在启动时构造本服务并调用 run_forever()；
+        - ControlPlane 在运行时调用 add_subscription/remove_subscription 动态变更订阅；
+    下游：
+        - PubSubPublisher（负责 Redis 发布），本类不关心 Redis 细节；
     """
+
     def __init__(self, cfg: RealtimeConfig, publisher, cache=None, logger: Optional[logging.Logger] = None):
-        if xtdata is None:
-            raise RuntimeError("xtquant.xtdata 未可用")
+        """
+        :param cfg: RealtimeConfig，订阅行为配置
+        :param publisher: 发布器对象，需提供 publish(dict) 方法（下游为 Redis PubSub）
+        :param cache: 可选的历史预热实现（需提供 ensure_downloaded_date_range(codes, periods, days)）
+        :param logger: 可选日志器
+        """
         self.cfg = cfg
         self.publisher = publisher
         self.cache = cache
-        self.logger = logger or logging.getLogger(__name__)
-        self._last_published: Dict[Tuple[str, str], str] = {}
-        self._subs: Dict[Tuple[str, str], bool] = {}  # 已注册订阅集合
+        self._log = logger or logging.getLogger(__name__)
 
-    # ---------- 辅助 ----------
-    def _preload_for(self, codes: List[str], period: str, days: int) -> None:
-        if not self.cache or days <= 0:
-            return
-        end = datetime.now(CN_TZ)
-        start = end - timedelta(days=days)
-        self.cache.ensure_downloaded_date_range(codes, period, start, end, incrementally=True)
+        # 并发保护
+        self._lock = threading.RLock()
 
-    def _register_one(self, code: str, period: str) -> None:
-        if (code, period) in self._subs:
-            return
-        xtdata.subscribe_quote(code, period, 2, lambda *_: self._on_event(code, period))
-        self._subs[(code, period)] = True
+        # 当前订阅集（(code, period)）
+        self._subs: set[Tuple[str, str]] = set()
 
-    def _unregister_one(self, code: str, period: str) -> None:
-        try:
-            if hasattr(xtdata, "unsubscribe_quote"):
-                xtdata.unsubscribe_quote(code, period)
-        except Exception:
-            pass
-        self._subs.pop((code, period), None)
+        # 去重：LRU + 集合
+        self._dedup_set: set[Tuple[str, str, Any]] = set()
+        self._dedup_q: deque[Tuple[str, str, Any]] = deque()
+        self._dedup_max = int(self.cfg.dedup_max_size or 50000)
 
-    # ---------- 动态接口 ----------
-    def add_subscription(self, codes: List[str], periods: List[str], preload_days: Optional[int] = None) -> None:
-        """方法说明：动态新增订阅
-        功能：按 period 预热→注册订阅；
-        上游：控制面；
-        下游：xtdata.subscribe_quote。
+        # 最近发布时间（观测用途）
+        self._last_pub_ts: Dict[Tuple[str, str], float] = {}
+
+    # ----------------------------------------------------------------------
+    # 入口：阻塞运行
+    # ----------------------------------------------------------------------
+    def run_forever(self) -> None:
+        """方法说明：阻塞运行生命周期
+        功能：
+            - 对 cfg.codes/cfg.periods 做一次初始订阅（含可选历史预热）；
+            - 阻塞调用 xtdata.run() 以驱动回调循环；
+        注意：
+            - xtdata.run() 内部是一个消息循环，按官方建议需保持运行；
         """
-        days = self.cfg.preload_days if preload_days is None else max(0, int(preload_days))
-        uniq_codes = sorted({c.strip() for c in codes if c.strip()})
-        uniq_periods = sorted({p.strip() for p in periods if p.strip()})
-        for p in uniq_periods:
-            self._preload_for(uniq_codes, p, days)
-            for c in uniq_codes:
-                self._register_one(c, p)
+        # 初始订阅（可能触发历史预热）
+        if self.cfg.codes and self.cfg.periods:
+            self.add_subscription(self.cfg.codes, self.cfg.periods, preload_days=self.cfg.preload_days)
+
+        # 阻塞运行 QMT 回调循环
+        self._log.info("[RT] xtdata.run() 开始阻塞运行")
+        try:
+            xtdata.run()
+        finally:
+            self._log.info("[RT] xtdata.run() 结束")
+
+    # ----------------------------------------------------------------------
+    # 动态增删订阅
+    # ----------------------------------------------------------------------
+    def add_subscription(self, codes: List[str], periods: List[str], preload_days: Optional[int] = None) -> None:
+        """方法说明：新增订阅
+        功能：
+            - 可选地先进行历史预热（补齐若干天）；
+            - 为每个 (code, period) 调用 _register_one 完成订阅注册；
+        :param codes: 标的列表
+        :param periods: 周期列表（'1m' | '1h' | '1d' 等）
+        :param preload_days: 覆盖 cfg.preload_days；为 0 或 None 则不预热
+        """
+        days = int(preload_days if preload_days is not None else self.cfg.preload_days or 0)
+        if days > 0:
+            self._preload_history(codes, periods, days)
+
+        with self._lock:
+            for c in codes:
+                for p in periods:
+                    if (c, p) in self._subs:
+                        continue
+                    self._register_one(c, p)
+                    self._subs.add((c, p))
+                    self._log.info("[RT] 订阅已注册: %s %s", c, p)
 
     def remove_subscription(self, codes: List[str], periods: List[str]) -> None:
-        """方法说明：动态撤销订阅
-        功能：取消回调并移除订阅集合；
-        上游：控制面；
-        下游：xtdata.unsubscribe_quote（若可用）。
+        """方法说明：移除订阅
+        功能：调用 xtdata.unsubscribe_quote，并更新内部订阅集
         """
-        uniq_codes = sorted({c.strip() for c in codes if c.strip()})
-        uniq_periods = sorted({p.strip() for p in periods if p.strip()})
-        for p in uniq_periods:
-            for c in uniq_codes:
-                self._unregister_one(c, p)
+        with self._lock:
+            for c in codes:
+                for p in periods:
+                    if (c, p) not in self._subs:
+                        continue
+                    try:
+                        xtdata.unsubscribe_quote(c, p)
+                    except Exception as e:
+                        self._log.warning("[RT] 取消订阅异常: %s %s err=%s", c, p, e)
+                    self._subs.discard((c, p))
+                    self._log.info("[RT] 订阅已移除: %s %s", c, p)
 
-    def status(self) -> Dict[str, Any]:  # type: ignore[override]
-        """方法说明：返回运行状态
-        功能：展示当前订阅集合与最后一次发布水位；
-        上游：控制面查询；
-        下游：UI/回执。
+    # ----------------------------------------------------------------------
+    # 订阅注册与回调处理
+    # ----------------------------------------------------------------------
+    def _register_one(self, code: str, period: str) -> None:
+        """方法说明：注册单标的/单周期订阅（官方签名回调）
+        功能：
+            - 向 xtdata.subscribe_quote 发起订阅（使用关键字参数）；
+            - 绑定符合签名的回调函数 _cb(datas)；
+        回调参数 datas：
+            - 字典：{ stock_code: [data1, data2, ...] }
         """
-        subs = sorted([{"code": c, "period": p} for (c, p) in self._subs.keys()], key=lambda x: (x["code"], x["period"]))
-        return {"subs": subs, "last_published": dict(self._last_published)}
+        def _cb(datas: Dict[str, List[Dict[str, Any]]]):
+            try:
+                self._on_datas(period, datas)
+            except Exception:
+                self._log.exception("[RT] 回调处理异常 period=%s", period)
 
-    # ---------- 主流程 ----------
-    def run_forever(self) -> None:
-        # 启动前预热
-        self.add_subscription(self.cfg.codes, self.cfg.periods, preload_days=self.cfg.preload_days)
-        # 进入事件循环
-        xtdata.run()
+        # 官方建议：订阅实时部分时 count=0；历史由预热负责
+        xtdata.subscribe_quote(
+            stock_code=code,
+            period=period,
+            start_time="",
+            end_time="",
+            count=0,
+            callback=_cb
+        )
 
-    # ---------- 回调处理 ----------
-    def _on_event(self, code: str, period: str) -> None:
-        """方法说明：行情事件回调
-        功能：拉取近 2 根，判收盘→发布，进程内去重。
-        上游：xtdata.subscribe_quote 回调；
-        下游：Redis 发布。
+    def _on_datas(self, period: str, datas: Dict[str, List[Dict[str, Any]]]) -> None:
+        """方法说明：处理 QMT 回调数据（datas）
+        功能：
+            - 遍历 datas 中每个代码的若干条 data；
+            - 规范化为“宽表” payload；
+            - 根据模式/去重策略决定是否发布；
         """
-        try:
-            df = xtdata.get_market_data(code, period, count=2, fill_data=True)
-        except Exception as e:
+        if not datas:
             return
-        if df is None or len(df) == 0:
-            return
-        # 取最后一根作为 close，倒数第二根作为 forming（可选）
-        try:
-            last_row = df.iloc[-1]
-            ts = last_row["time"]  # 形如 "YYYY-mm-dd HH:MM:SS"
-        except Exception:
-            return
-        key = (code, period)
-        if self.cfg.mode == "forming_and_close":
-            # 先发布 forming（上一根）
-            if len(df) >= 2:
-                prev = df.iloc[-2]
-                self._publish_bar(code, period, prev, is_closed=False)
-        # 发布 close（幂等：相同 bar_end_ts 不重复）
-        last_ts = str(ts)
-        if self._last_published.get(key) == last_ts:
-            return
-        self._publish_bar(code, period, last_row, is_closed=True)
-        self._last_published[key] = last_ts
 
-    def _publish_bar(self, code: str, period: str, row, is_closed: bool) -> None:
+        for code, rows in datas.items():
+            if not rows:
+                continue
+            for row in rows:
+                payload = self._build_payload_from_row(code, period, row)
+
+                # 去重键：code + period + bar_end_ts（bar_end_ts 缺失则无法去重，直接跳过或直接推送）
+                dkey = (payload.get("code"), payload.get("period"), payload.get("bar_end_ts"))
+
+                # 模式过滤
+                if self.cfg.mode == "close_only":
+                    # 仅在明确收盘时推送（默认为 False，避免误推 forming）
+                    if payload.get("is_closed") is not True:
+                        continue
+
+                # 去重判定
+                if dkey[2] is not None and self._is_dup_and_mark(dkey):
+                    continue
+
+                self.publisher.publish(payload)
+                with self._lock:
+                    self._last_pub_ts[(code, period)] = time.time()
+
+    # ----------------------------------------------------------------------
+    # 预热（历史补齐）
+    # ----------------------------------------------------------------------
+    def _preload_history(self, codes: List[str], periods: List[str], days: int) -> None:
+        """方法说明：历史预热
+        功能：
+            - 若提供了 cache.ensure_downloaded_date_range，则优先使用；
+            - 否则回退至逐标的/逐周期调用 xtdata.download_history_data；
+        注意：
+            - xtdata.download_history_data(stock_code: str, period: str, start_time: str, end_time: str)
+              仅接受单只股票代码，且需要 YYYYMMDD（或更精细）格式；
+        """
+        if days <= 0:
+            return
+
+        if self.cache and hasattr(self.cache, "ensure_downloaded_date_range"):
+            try:
+                self.cache.ensure_downloaded_date_range(codes, periods, days=days)
+                self._log.info("[RT] 历史预热(使用cache)完成 days=%d codes=%d periods=%d", days, len(codes), len(periods))
+                return
+            except Exception as e:
+                self._log.warning("[RT] 历史预热(cache)异常，将使用直接下载：%s", e)
+
+        end = datetime.today().date()
+        start = end - timedelta(days=days)
+        start_s = start.strftime("%Y%m%d")
+        end_s = end.strftime("%Y%m%d")
+
+        for c in codes:
+            for p in periods:
+                try:
+                    xtdata.download_history_data(
+                        stock_code=c,
+                        period=p,
+                        start_time=start_s,
+                        end_time=end_s,
+                        incrementally=True
+                    )
+                except Exception as e:
+                    self._log.warning("[RT] 历史下载异常: %s %s err=%s", c, p, e)
+        self._log.info("[RT] 历史预热完成 days=%d", days)
+
+    # ----------------------------------------------------------------------
+    # 构建“宽表”payload
+    # ----------------------------------------------------------------------
+    def _build_payload_from_row(self, code: str, period: str, row: Dict[str, Any]) -> Dict[str, Any]:
+        """方法说明：将单条 QMT 回调数据标准化为“宽表”payload
+        字段约定（可能缺失则为 None）：
+            - code, period
+            - bar_end_ts：K线结束时间（原样透传 QMT 的 time 字段，可能为字符串或毫秒时间戳）
+            - is_closed：是否收盘（容错 isClosed/isClose/closed，多字段择优；默认 False）
+            - open, high, low, close, volume, amount
+            - preClose, suspendFlag, openInterest, settlementPrice
+        """
+        # 时间字段容错：'time' / 'Time' / 'barTime'
+        bar_ts = row.get("time", None)
+        if bar_ts is None:
+            bar_ts = row.get("Time", None)
+        if bar_ts is None:
+            bar_ts = row.get("barTime", None)
+
+        # 收盘标记容错
+        is_closed = row.get("isClosed", None)
+        if is_closed is None:
+            is_closed = row.get("isClose", None)
+        if is_closed is None:
+            is_closed = row.get("closed", None)
+        if is_closed is None:
+            is_closed = False  # 默认认为未收盘，避免在 close_only 中误推
+
         payload = {
             "code": code,
             "period": period,
-            "bar_open_ts": None,  # QMT 未直接给开盘时间，保持 None；可在下游推导
-            "bar_end_ts": str(row.get("time")),
-            "is_closed": is_closed,
-            "open": float(row.get("open", 0.0)),
-            "high": float(row.get("high", 0.0)),
-            "low": float(row.get("low", 0.0)),
-            "close": float(row.get("close", 0.0)),
-            "volume": float(row.get("volume", 0.0)),
-            "amount": float(row.get("amount", 0.0)),
-            "source": "qmt",
-            "recv_ts": datetime.now(CN_TZ).isoformat(),
-        }
-        try:
-            self.publisher.publish(payload)
-        except Exception:
-            pass
+            "bar_end_ts": bar_ts,  # 保持原样，消费方可自行转 ISO 或毫秒
+            "is_closed": bool(is_closed),
 
+            # 常见宽表字段
+            "open": row.get("open"),
+            "high": row.get("high"),
+            "low": row.get("low"),
+            "close": row.get("close"),
+            "volume": row.get("volume"),
+            "amount": row.get("amount"),
+
+            # 其他字段
+            "preClose": row.get("preClose"),
+            "suspendFlag": row.get("suspendFlag"),
+            "openInterest": row.get("openInterest"),
+            "settlementPrice": row.get("settlementPrice") or row.get("settelementPrice"),
+        }
+        return payload
+
+    # ----------------------------------------------------------------------
+    # 去重（LRU）
+    # ----------------------------------------------------------------------
+    def _is_dup_and_mark(self, key: Tuple[str, str, Any]) -> bool:
+        """方法说明：判断是否重复并写入 LRU 结构
+        功能：
+            - 若 key 已在集合中：返回 True；
+            - 否则：写入集合与队列，若超容量则弹出最旧项；
+        """
+        with self._lock:
+            if key in self._dedup_set:
+                return True
+            self._dedup_set.add(key)
+            self._dedup_q.append(key)
+            if len(self._dedup_q) > self._dedup_max:
+                old = self._dedup_q.popleft()
+                self._dedup_set.discard(old)
+        return False
+
+    # ----------------------------------------------------------------------
+    # 状态查询
+    # ----------------------------------------------------------------------
+    def status(self) -> Dict[str, Any]:
+        """方法说明：返回服务状态
+        内容：
+            - subs：当前订阅数组 [{'code':..., 'period':...}, ...]
+            - last_published：最近一次发布时间（epoch 秒）按 (code, period) 组织
+        """
+        with self._lock:
+            subs = sorted([{"code": c, "period": p} for (c, p) in self._subs],
+                          key=lambda x: (x["code"], x["period"]))
+            last_pub = {f"{c}|{p}": ts for (c, p), ts in self._last_pub_ts.items()}
+        return {"subs": subs, "last_published": last_pub}

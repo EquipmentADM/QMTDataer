@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import threading
+import time
 from typing import Optional, Dict, Any, List
 
 try:
@@ -18,8 +19,8 @@ from .registry import Registry, SubscriptionSpec
 class ControlPlane(threading.Thread):
     """类说明：控制面消费者线程
     功能：监听 Redis PubSub 通道，处理 subscribe/unsubscribe/status 命令；
-    上游：策略管理器（通过 Redis 发布命令）；
-    下游：RealtimeSubscriptionService（执行订阅与退订）、Registry（持久化）。
+    上游：策略管理器；
+    下游：RealtimeSubscriptionService、Registry。
     """
     daemon = True
 
@@ -29,20 +30,34 @@ class ControlPlane(threading.Thread):
         super().__init__(name="ControlPlane")
         if _IMPORT_ERR is not None:
             raise RuntimeError(f"未能导入 redis：{_IMPORT_ERR}")
-        self._r = redis.Redis(host=host, port=port, password=password, db=db, decode_responses=True)
-        self._pubsub = self._r.pubsub()
+        # 增强健壮性：开启健康检查与超时，减轻 Windows 端 10038 问题
+        self._r = redis.Redis(host=host, port=port, password=password, db=db,
+                              decode_responses=True, health_check_interval=5, socket_timeout=5)
+        self._pubsub = None
         self._channel = channel
         self._ack_prefix = ack_prefix.rstrip(":")
         self._registry = Registry(host, port, password, db, prefix=registry_prefix)
         self._svc = svc
         self._accept = set(accept_strategies or [])
-        self._stop = threading.Event()
+        self._stop_evt = threading.Event()
         self._logger = logger
 
-    def stop(self) -> None:
-        self._stop.set()
+    def _ensure_pubsub(self) -> None:
+        """方法说明：重建 PubSub 并订阅控制通道"""
         try:
-            self._pubsub.close()
+            if self._pubsub:
+                self._pubsub.close()
+        except Exception:
+            pass
+        self._pubsub = self._r.pubsub()
+        self._pubsub.subscribe(self._channel)
+
+    def stop(self) -> None:
+        """方法说明：请求线程停止并关闭 PubSub"""
+        self._stop_evt.set()
+        try:
+            if self._pubsub:
+                self._pubsub.close()
         except Exception:
             pass
 
@@ -116,15 +131,25 @@ class ControlPlane(threading.Thread):
                                 "subs": self._registry.list_all()})
 
     def run(self) -> None:
-        self._pubsub.subscribe(self._channel)
-        while not self._stop.is_set():
-            msg = self._pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+        """方法说明：主循环；带异常恢复的 get_message"""
+        self._ensure_pubsub()
+        while not self._stop_evt.is_set():
+            try:
+                msg = self._pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            except (redis.exceptions.ConnectionError, OSError) as e:
+                if self._logger:
+                    self._logger.warning("control-plane pubsub 断开，将重连：%s", e)
+                time.sleep(0.5)
+                self._ensure_pubsub()
+                continue
+
             if not msg:
                 continue
             try:
                 data = json.loads(msg.get("data", "{}"))
             except Exception:
                 continue
+
             action = str(data.get("action", "")).lower()
             if action == "subscribe":
                 self._handle_subscribe(data)
