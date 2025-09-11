@@ -3,11 +3,13 @@
 # @Author : EquipmentADV
 # @File : registry.py
 # @Software : PyCharm
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Dict, Any, List, Optional
 import time
 import uuid
+import json
 
 try:
     import redis
@@ -54,8 +56,40 @@ class Registry:
     def gen_sub_id() -> str:
         return f"sub-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
 
+    @staticmethod
+    def _encode_mapping(d: Dict[str, Any]) -> Dict[str, str]:
+        """方法说明：将 dict 转为 Redis 可接受的 {str: str}
+        功能：list/dict -> JSON 字符串；其他 -> str；
+        上游：save；下游：Redis.hset。
+        """
+        out: Dict[str, str] = {}
+        for k, v in d.items():
+            if isinstance(v, (list, dict)):
+                out[k] = json.dumps(v, ensure_ascii=False)
+            else:
+                out[k] = "" if v is None else str(v)
+        return out
+
+    @staticmethod
+    def _decode_mapping(d: Dict[str, str]) -> Dict[str, Any]:
+        """方法说明：反序列化部分字段（尽力而为）"""
+        out: Dict[str, Any] = dict(d)
+        for k in ("codes", "periods"):
+            if k in out:
+                try:
+                    out[k] = json.loads(out[k])
+                except Exception:
+                    pass
+        if "created_at" in out:
+            try:
+                out["created_at"] = int(out["created_at"])
+            except Exception:
+                pass
+        return out
+
     def save(self, sub_id: str, spec: SubscriptionSpec) -> None:
-        self._cli.hset(self._k_sub(sub_id), mapping=asdict(spec))
+        payload = self._encode_mapping(asdict(spec))
+        self._cli.hset(self._k_sub(sub_id), mapping=payload)
         self._cli.sadd(self._k_subs(), sub_id)
         self._cli.sadd(self._k_strategy_subs(spec.strategy_id), sub_id)
 
@@ -71,7 +105,7 @@ class Registry:
 
     def load(self, sub_id: str) -> Optional[Dict[str, Any]]:
         data = self._cli.hgetall(self._k_sub(sub_id))
-        return data or None
+        return self._decode_mapping(data) if data else None
 
     def list_by_strategy(self, strategy_id: str) -> List[str]:
         return sorted(self._cli.smembers(self._k_strategy_subs(strategy_id)))

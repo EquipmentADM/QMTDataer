@@ -4,39 +4,48 @@
 #   - 若不修改，可直接用于 scripts/run_with_config.py 的 --config 参数。
 
 qmt:
+  # 接线模式：
+  # - none   ：仅做最小校验（适合不需要 QMT 交易，仅行情）；
+  # - legacy ：按 MiniQMT/xtquant 的旧式行为处理（若你的环境需要这样）。
   mode: none
-  token: ''
+  token: ''  # 预留，部分环境可能用于鉴权
 
 redis:
-  url: "redis://127.0.0.1:6379/0"  # 优先使用 URL；若提供，会解析为 host/port/password/db
-  host: 127.0.0.1                   # 当未提供 url 时使用
+  # 优先使用 URL；若提供，会解析为 host/port/password/db
+  url: "redis://127.0.0.1:6379/0"
+
+  # 如果没有 url，则按以下字段连接：
+  host: 127.0.0.1
   port: 6379
   password: null
   db: 0
+
+  # 行情推送主题（PubSub）
   topic: xt:topic:bar
 
 subscription:
+  # 初始订阅集合（可在运行时通过 ControlPlane 动态增减）
   codes: [518880.SH, 513880.SH]
-  periods: [1m, 1d]
-  mode: close_only
-  close_delay_ms: 100
-  preload_days: 3
+  periods: [1m, 1d]       # 当前实现支持 1m/1d（以及 1h，如你已在代码里开启）
+  mode: close_only        # close_only: 仅收盘（K线收敛）时推一次；forming_and_close: 生成中也推
+  close_delay_ms: 100     # 收盘触发推送前延迟（毫秒，防抖用途）
+  preload_days: 3         # 启动时预热历史天数（QMT 需先 download_history_data 才能 get）
 
 logging:
-  level: INFO
-  json: false
+  level: INFO             # DEBUG/INFO/WARNING/ERROR
+  json: false             # 为 true 时输出 JSON 日志
   file: logs/realtime_bridge.log     # 建议开启文件输出，便于轮转
   rotate:
     enabled: true
-    max_bytes: 10485760             # 10MB
+    max_bytes: 10485760   # 10MB
     backup_count: 5
 
 health:
   enabled: false
-  key_prefix: xt:bridge:health      # 健康上报 Redis Key 前缀
-  interval_sec: 5                   # 上报间隔
-  ttl_sec: 20                       # 键过期时间（秒）
-  instance_tag: bridge-A            # 可选：实例标识（用于区分多实例）
+  key_prefix: xt:bridge:health  # 健康上报 Redis Key 前缀
+  interval_sec: 5               # 上报间隔
+  ttl_sec: 20                   # 键过期时间（秒）
+  instance_tag: bridge-A        # 可选：实例标识（用于区分多实例）
 
 control:
   enabled: true
