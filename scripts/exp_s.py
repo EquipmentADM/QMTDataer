@@ -1,121 +1,87 @@
 # -*- coding: utf-8 -*-
 """
-xt_quote_inspector.py
-用途：对比 xtdata 回调推送的数据 与 回调内同步拉取的 get_market_data_ex 的数据，
-     逐次、逐字段打印差异，并记录到 CSV，便于你研究推送机制、时序与字段变化规律。
+xt_quote_inspector.py（翻新版）
+功能概述：
+  - 对比 xtdata 回调推送（push） 与 回调内同步拉取 get_market_data_ex（pull）的字段，按“每标的”逐条打印与落CSV；
+  - 支持 1~10 个标的同时订阅；量化回调→拉取的毫秒延迟；
+  - 字段统一与白名单比较，避免接口层噪声（如拼写差异、非核心字段）干扰判断；
+  - 规范化 DataFrame/Series/列表为“代码.字段 -> 标量”，彻底规避 pandas 对齐/布尔歧义错误。
 
-运行方式：
-    python xt_quote_inspector.py
+类/方法说明（简述上下游）：
+  - class QuoteInspector：负责订阅、回调处理、打印与CSV记录
+    - start(): 对 codes 启动 subscribe_quote（上游：xtdata.subscribe_quote；下游：回调 on_quote）
+    - run_loop(): 进入事件循环（上游：业务入口；下游：xtdata.run）
+    - on_quote(datas): 回调入口；对每个标的做 push/pull 规范化、比较与记录
+  - normalize_push_payload / normalize_pull_payload：输入为 push/pull 原始结构（上游：xtdata），
+    输出扁平标量字典（下游：diff/打印/CSV）
+  - dict_diff_common: 仅比较两侧共同键的差异，减少“某侧缺字段”的噪声
+  - canonize_fields: 字段重命名与白名单过滤，输出“更干净”的可比键
 
+使用：
+  python xt_quote_inspector.py
 依赖：
-    - 你的运行环境已正确安装并登录 xtdata
-    - Python 3.8+
+  - pandas
+  - xtquant.xtdata（你的环境需已登录可用）
 """
 
 import csv
 import json
 import os
-import sys
 import time
 import threading
-from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+from xtquant import xtdata  # 若你的环境是 from xtdata import xtdata，请自行调整
 
-# ========== 你的订阅配置 ==========
-STOCK_LIST = ['510050.SH', '159915.SZ', '510330.SH']   # 多标的对比是否有“时差”
-PERIOD = "1m"
-CSV_PATH = "quote_events.csv"             # 输出事件流水，Excel/CSV都能打开
-PRINT_COMPACT = True                      # True：单行紧凑；False：多行更详细
-MAX_PRETTY_VAL_LEN = 200                  # 控制打印值的最大长度，避免控制台刷屏
-# ==================================
-
-# ---- 这里假定已安装 xtdata 并可导入；如你需在别处改成 from xtquant import xtdata 请自行调整 ----
-from xtquant import xtdata
-
-
-# ========== 工具函数（可单测） ==========
-def dict_diff(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, tuple]:
-    """
-    功能：对比两个“已规范化为标量值”的字典，输出变化键 -> (old, new)。
-    约定：传入前务必用 normalize_* 把 DataFrame/Series/列表等转成标量。
-    """
-    changed = {}
-    old = old or {}
-    new = new or {}
-    for k in set(old.keys()) | set(new.keys()):
-        ov = old.get(k, None)
-        nv = new.get(k, None)
-        if ov != nv:  # 现在均为标量/可比较对象，不会触发 pandas 对齐
-            changed[k] = (ov, nv)
-    return changed
+# ======== 配置 ========
+STOCK_LIST: List[str] = ['510050.SH', '159915.SZ', '510330.SH']  # 支持1~10个，超出将报错
+PERIOD: str = "1m"
+COUNT: int = -1                         # -1：只接收后续；1：预热一条
+CSV_PATH: str = "quote_events.csv"
+PRINT_COMPACT: bool = True              # True: 单行紧凑；False: 多行详细
+MAX_PRETTY_VAL_LEN: int = 200
+CORE_WHITELIST = {"time", "open", "high", "low", "close", "volume", "amount", "openInterest"}
+CANON_RENAME = {
+    # 统一拼写错误：拉取端常见拼写 "settelementPrice" -> "settlementPrice"
+    "settelementPrice": "settlementPrice",
+}
+# =====================
 
 
-
+# ================= 工具函数（可单测） =================
 def _shorten(v: Any, max_len: int = MAX_PRETTY_VAL_LEN) -> str:
-    """控制打印长度，便于阅读控制台输出。"""
+    """控制打印长度，避免刷屏。"""
     try:
         s = json.dumps(v, ensure_ascii=False, default=str)
     except Exception:
         s = str(v)
-    if len(s) > max_len:
-        return s[:max_len] + f"...(+{len(s)-max_len} chars)"
-    return s
-
-def normalize_pull_payload(pull_data: Any) -> Dict[str, Any]:
-    """
-    将 get_market_data_ex 返回的 { code: DataFrame } 规范化为：{ "代码.字段": 标量 }
-    - 取每个 DataFrame 的最后一行 .iloc[-1] → dict
-    - 非 DataFrame 情况尽量字符串化保底
-    """
-    flat = {}
-    if isinstance(pull_data, dict):
-        for code, v in pull_data.items():
-            if isinstance(v, pd.DataFrame) and not v.empty:
-                row = v.iloc[-1].to_dict()
-                for kk, vv in row.items():
-                    flat[f"{code}.{kk}"] = _to_scalar(vv)
-            elif isinstance(v, pd.Series):
-                row = v.to_dict()
-                for kk, vv in row.items():
-                    flat[f"{code}.{kk}"] = _to_scalar(vv)
-            elif isinstance(v, dict):
-                for kk, vv in v.items():
-                    flat[f"{code}.{kk}"] = _to_scalar(vv)
-            else:
-                flat[f"{code}.value"] = _to_scalar(v)
-    else:
-        flat["raw"] = json.dumps(pull_data, ensure_ascii=False, default=str)
-    return flat
+    return s if len(s) <= max_len else s[:max_len] + f"...(+{len(s)-max_len} chars)"
 
 
 def _to_scalar(v: Any) -> Any:
-    """
-    尽量把 numpy/pandas 标量/时间戳转成 Python 标量，避免后续比较触发矛盾。
-    """
+    """尽量把 numpy/pandas 标量/时间戳转 Python 标量，避免 pandas 布尔歧义。"""
     try:
-        # pandas/NumPy 数值/时间戳
         if hasattr(v, "item"):
             return v.item()
     except Exception:
         pass
-    # pandas.Timestamp -> int 毫秒 或 iso 字符串（任选一种，你已有毫秒字段，这里保持原值）
     return v
 
 
 def normalize_push_payload(push_data: Any) -> Dict[str, Any]:
     """
-    将回调 push 的数据规范化为：{ "代码.字段": 标量 }。
-    你的回调 data 形如：{ "159915.SZ": [ {time, open, ...} ] }
-    - 若列表非空，取最后一个元素（通常只有一条）
-    - 若是嵌套/异常结构，尽量字符串化保底
+    将回调 push 的数据规范化为 { "代码.字段": 标量 }。
+    典型结构：{ "159915.SZ": [ {time, open, ...} ] } 或 { "510050.SH": {...} }
+    - 若值为列表，取最后一个元素（一般只有一条）；若为字典，逐项展平。
+    - 无法识别结构时，保底字符串化。
+    上游：xtdata.subscribe_quote 回调 data
+    下游：字段对比/打印/CSV
     """
-    flat = {}
+    flat: Dict[str, Any] = {}
     if isinstance(push_data, dict):
         for code, v in push_data.items():
-            # 典型：v 是 [ {kline字段...} ]
             if isinstance(v, list) and v:
                 last = v[-1]
                 if isinstance(last, dict):
@@ -129,278 +95,263 @@ def normalize_push_payload(push_data: Any) -> Dict[str, Any]:
             else:
                 flat[f"{code}.value"] = _to_scalar(v)
     else:
-        # 无法识别结构时，存一份字符串化的原样
         flat["raw"] = json.dumps(push_data, ensure_ascii=False, default=str)
     return flat
 
 
-def try_extract_symbol(payload: Any) -> Optional[str]:
+def normalize_pull_payload(pull_data: Any) -> Dict[str, Any]:
     """
-    功能：从回调的 data 中“尽力”探测标的代码字段名。
-    可能的键名：'code'/'stock_code'/'security_id'/'symbol' 等；
-    如果 data 是列表或嵌套 dict，会尝试向里探测第一项。
-    上游：回调入参 data
-    下游：用于建立“每标的”的状态表与分桶统计
+    将 get_market_data_ex 返回的 { code: DataFrame/Series/dict } 规范化为 { "代码.字段": 标量 }
+    - DataFrame：取最后一行 .iloc[-1].to_dict() 展平；
+    - Series：to_dict()；
+    - dict：逐项展平。
+    上游：xtdata.get_market_data_ex
+    下游：字段对比/打印/CSV
     """
-    candidates = ['code', 'stock_code', 'security_id', 'symbol', 'sec_code']
-    def _probe(d):
-        if not isinstance(d, dict):
-            return None
-        for k in candidates:
-            if k in d and isinstance(d[k], str):
-                return d[k]
-        # 有些结构像 {'510050.SH': {...}, '159915.SZ': {...}}，则取第一层键名
-        # 仅在键名看起来像代码时启用
-        for k in d.keys():
-            if isinstance(k, str) and ('.SH' in k or '.SZ' in k):
-                return k
-        return None
-
-    if isinstance(payload, dict):
-        sym = _probe(payload)
-        if sym:
-            return sym
-        # 若是 { 'data': {...} } 这种
-        for v in payload.values():
-            sym = try_extract_symbol(v)
-            if sym:
-                return sym
-    elif isinstance(payload, list) and payload:
-        return try_extract_symbol(payload[0])
-    return None
-
-
-def extract_flat_snapshot_from_get_market(data_ex: Any) -> Dict[str, Any]:
-    """
-    功能：将 xtdata.get_market_data_ex 返回的结构转成扁平 dict，便于直接比较/打印。
-    注意：不同版本/行情源返回结构可能不同，这里做“尽力扁平化”，你可按实际调整。
-    上游：回调内 get_market_data_ex 的原始返回
-    下游：dict_diff / 打印
-    """
-    # 典型结构可能类似：{ '510050.SH': {'time':xxx, 'open':..., ...}, '159915.SZ': {...}}
     flat: Dict[str, Any] = {}
-    if isinstance(data_ex, dict):
-        for k, v in data_ex.items():
-            # 若 v 就是字典，直接并入（加前缀避免冲突）
-            if isinstance(v, dict):
+    if isinstance(pull_data, dict):
+        for code, v in pull_data.items():
+            if isinstance(v, pd.DataFrame) and not v.empty:
+                row = v.iloc[-1].to_dict()
+                for kk, vv in row.items():
+                    flat[f"{code}.{kk}"] = _to_scalar(vv)
+            elif isinstance(v, pd.Series):
+                for kk, vv in v.to_dict().items():
+                    flat[f"{code}.{kk}"] = _to_scalar(vv)
+            elif isinstance(v, dict):
                 for kk, vv in v.items():
-                    flat[f"{k}.{kk}"] = vv
+                    flat[f"{code}.{kk}"] = _to_scalar(vv)
             else:
-                flat[str(k)] = v
+                flat[f"{code}.value"] = _to_scalar(v)
     else:
-        # 不认识的结构，直接字符串化
-        flat['raw'] = data_ex
+        flat["raw"] = json.dumps(pull_data, ensure_ascii=False, default=str)
     return flat
-# ======================================
+
+
+def canonize_fields(flat: Dict[str, Any],
+                    whitelist: Optional[set] = CORE_WHITELIST,
+                    rename: Optional[Dict[str, str]] = CANON_RENAME) -> Dict[str, Any]:
+    """
+    字段统一与白名单过滤：
+      - 将末级字段名按 rename 更名（如 settelementPrice -> settlementPrice）；
+      - 若提供 whitelist，仅保留白名单字段（如核心价量），降低噪声。
+    上游：normalize_* 的输出
+    下游：dict_diff_common
+    """
+    out: Dict[str, Any] = {}
+    for k, v in flat.items():
+        # 取“末级字段”名
+        parts = k.split(".")
+        if len(parts) >= 2:
+            base = parts[-1]
+            code = ".".join(parts[:-1])
+        else:
+            base = parts[-1]
+            code = ""
+
+        # 重命名
+        if base in rename:
+            base = rename[base]
+        new_key = f"{code}.{base}" if code else base
+
+        # 白名单过滤
+        if whitelist is None or base in whitelist:
+            out[new_key] = v
+    return out
+
+
+def dict_diff_common(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Tuple[Any, Any]]:
+    """
+    仅比较两侧“共同键”的差异，减少某侧缺字段导致的噪声。
+    上游：canonize_fields 的结果
+    下游：打印与CSV的 diff_keys
+    """
+    diff: Dict[str, Tuple[Any, Any]] = {}
+    common = set(a.keys()) & set(b.keys())
+    for k in sorted(common):
+        if a[k] != b[k]:
+            diff[k] = (a[k], b[k])
+    return diff
+
+
+def extract_codes_from_push(push_data: Any) -> List[str]:
+    """
+    从回调 push 的原始数据提取本次触发的代码列表。
+    典型结构为 dict 的顶层键即代码；无法识别则返回空列表。
+    """
+    if isinstance(push_data, dict):
+        return [k for k in push_data.keys() if isinstance(k, str) and (".SH" in k or ".SZ" in k)]
+    return []
+# =====================================================
 
 
 @dataclass
 class LastState:
-    """维护某“标的@周期”的上一次观测状态"""
-    last_push: Dict[str, Any] = field(default_factory=dict)   # 回调侧：上次推送扁平化后的值
-    last_pull: Dict[str, Any] = field(default_factory=dict)   # 拉取侧：上次 get_market_data_ex 的扁平值
-    last_event_ts: float = 0.0                                # 上次事件时间（回调触发点，epoch 秒）
-    seq: int = 0                                              # 事件序号（用于可视化排序）
+    """维护某“标的@周期”的上一次观测状态（便于后续扩展做环比等）。"""
+    last_push: Dict[str, Any] = field(default_factory=dict)
+    last_pull: Dict[str, Any] = field(default_factory=dict)
+    last_event_ts: float = 0.0
+    seq: int = 0
 
 
-class CallbackInspector:
+class QuoteInspector:
     """
-    功能：订阅多标的报价，捕捉每次回调，结构化打印：
-        - 回调 data 的关键信息（尽量提取 symbol）
-        - 回调里同步拉取 get_market_data_ex 的扁平快照
-        - 计算 push(回调) 与 pull(拉取) 的字段级差异
-        - 记录时间戳、线程ID、事件序号、延迟（回调->拉取）等
-        - 写入 CSV 便于后续深度分析（Excel/Pandas）
-
-    上游：xtdata.subscribe_quote 的回调数据
-    下游：控制台与 CSV
+    订阅-回调观测器
+    作用：对多个标的的“回调推送 vs 拉取快照”进行逐条对齐、打印与CSV记录。
+    上游：业务入口（提供 codes/period/count）→ start() / run_loop()
+    下游：控制台与 CSV 输出，用于你研究：分钟内滚动、跨标的时差、延迟、字段一致性等。
     """
 
-    def __init__(self, stock_list: List[str], period: str, csv_path: str):
-        self.stock_list = stock_list
+    def __init__(self, codes: List[str], period: str, count: int, csv_path: str):
+        """
+        :param codes: 标的列表（1~10）
+        :param period: 订阅周期（如 '1m'）
+        :param count: 订阅 count 语义（-1 仅后续；1 预热一条）
+        :param csv_path: CSV 路径
+        """
+        if not (1 <= len(codes) <= 10):
+            raise ValueError("本工具支持订阅 1~10 个标的，请调整 STOCK_LIST。")
+        self.codes = codes
         self.period = period
+        self.count = count
         self.csv_path = csv_path
-        self.lock = threading.Lock()
-        # 以 (symbol, period) 维度维护“上一次状态”
-        self.states: Dict[Tuple[str, str], LastState] = defaultdict(LastState)
+        self._lock = threading.Lock()
+        # 按 (symbol, period) 维护独立序号，便于阅读
+        self._states: Dict[Tuple[str, str], LastState] = {}
+
         self._init_csv()
 
     def _init_csv(self):
-        # CSV 字段
-        self.csv_fields = [
-            'event_time', 'event_time_readable', 'thread_id', 'seq',
-            'symbol', 'period', 'pull_latency_ms',
-            'push_keys', 'pull_keys', 'push_pull_diff_keys',
-            'push_brief', 'pull_brief'
+        self._csv_fields = [
+            "event_time", "event_time_readable", "thread_id", "seq",
+            "symbol", "period", "latency_ms",
+            "push_keys", "pull_keys", "diff_keys",
+            "push_brief", "pull_brief"
         ]
-        if (not os.path.exists(self.csv_path)):
-            with open(self.csv_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=self.csv_fields)
-                writer.writeheader()
+        if not os.path.exists(self.csv_path):
+            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+                csv.DictWriter(f, fieldnames=self._csv_fields).writeheader()
 
-    def _write_csv_row(self, row: Dict[str, Any]):
-        with open(self.csv_path, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=self.csv_fields)
-            writer.writerow(row)
+    def _csv_row(self, row: Dict[str, Any]):
+        with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+            csv.DictWriter(f, fieldnames=self._csv_fields).writerow(row)
 
-    def _flatten_push_payload(self, data: Any) -> Dict[str, Any]:
-        """
-        将回调 data 尽力扁平化为 dict，便于比较/打印。
-        这里遵循“少做假设，多做字符串化”的原则，避免因结构差异报错。
-        """
-        if isinstance(data, dict):
-            # 浅层展开一层
-            flat = {}
-            for k, v in data.items():
-                if isinstance(v, (dict, list)):
-                    flat[k] = v  # 保留原型（打印时会截断），不递归展开避免过深
-                else:
-                    flat[k] = v
-            return flat
-        elif isinstance(data, list):
-            # 只放入长度与第一项，避免太长
-            return {"list_len": len(data), "first_item": data[0] if data else None}
-        else:
-            return {"value": data}
-
-    def _pretty_print_event(self,
-                            symbol: str,
-                            push_flat: Dict[str, Any],
-                            pull_flat: Dict[str, Any],
-                            latency_ms: float,
-                            seq: int):
-        """控制台打印（紧凑 / 多行）"""
+    def _pretty_print(self, symbol: str, push_flat: Dict[str, Any],
+                      pull_flat: Dict[str, Any], latency_ms: float, seq: int):
         now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        header = f"[{now}] seq={seq} symbol={symbol} period={self.period} latency={latency_ms:.1f}ms"
+        head = f"[{now}] seq={seq} symbol={symbol} period={self.period} latency={latency_ms:.1f}ms"
+
+        # 共同键差异
+        diff = dict_diff_common(push_flat, pull_flat)
+        push_keys = ",".join(sorted(push_flat.keys()))
+        pull_keys = ",".join(sorted(pull_flat.keys()))
+        diff_keys = ",".join(sorted(diff.keys()))
+
         if PRINT_COMPACT:
-            # 紧凑单行，关键信息先行
-            diff = dict_diff(push_flat, pull_flat)
-            line = (
-                header
-                + " | push_keys="
-                + ",".join(sorted(push_flat.keys()))
-                + " | pull_keys="
-                + ",".join(sorted(pull_flat.keys()))
-                + " | diff_keys="
-                + ",".join(sorted(diff.keys()))
-                + " | push="
-                + _shorten(push_flat)
-                + " | pull="
-                + _shorten(pull_flat)
-            )
+            line = (head
+                    + f" | push_keys={push_keys} | pull_keys={pull_keys} | diff_keys={diff_keys}"
+                    + f" | push={_shorten(push_flat)} | pull={_shorten(pull_flat)}")
             print(line)
         else:
             print("=" * 100)
-            print(header)
-            print("  [PUSH] 回调数据（扁平）：", _shorten(push_flat))
-            print("  [PULL] 拉取数据（扁平）：", _shorten(pull_flat))
-            diff = dict_diff(push_flat, pull_flat)
+            print(head)
+            print("  [PUSH] ", _shorten(push_flat))
+            print("  [PULL] ", _shorten(pull_flat))
             if diff:
-                print("  [DIFF] 字段变化：")
+                print("  [DIFF]")
                 for k, (ov, nv) in diff.items():
-                    print(f"    - {k}: {_shorten(ov)} -> {_shorten(nv)}")
+                    print(f"    - {k}: {ov} -> {nv}")
             else:
-                print("  [DIFF] 无字段变化")
+                print("  [DIFF] 无")
             print("=" * 100)
 
-    # ----------------- 回调入口 -----------------
-    def on_quote(self, data: Any):
+        # CSV
+        self._csv_row({
+            "event_time": f"{time.time():.3f}",
+            "event_time_readable": now,
+            "thread_id": threading.get_ident(),
+            "seq": seq,
+            "symbol": symbol,
+            "period": self.period,
+            "latency_ms": f"{latency_ms:.1f}",
+            "push_keys": " ".join(sorted(push_flat.keys())),
+            "pull_keys": " ".join(sorted(pull_flat.keys())),
+            "diff_keys": " ".join(sorted(diff.keys())),
+            "push_brief": _shorten(push_flat),
+            "pull_brief": _shorten(pull_flat),
+        })
+
+    # ---------------- 回调入口 ----------------
+    def on_quote(self, datas: Any):
         """
-        xtdata.subscribe_quote 的回调函数。
-        关键步骤：
-          1) 记录回调触发时间 t_push
-          2) 尝试识别 symbol（标的），若识别不到则标记为 'UNKNOWN'
-          3) 在回调内同步拉取 get_market_data_ex，记录 t_pull，并计算 latency
-          4) 扁平化 push/pull，计算 diff
-          5) 控制台打印 + 写入 CSV
-          6) 更新 last_state
+        订阅回调：一次触发可能包含 1~N 个代码（取决于源端聚合方式），
+        本函数会对其中每个代码单独做 push/pull 对齐与输出。
         """
         t_push = time.time()
-        thread_id = threading.get_ident()
+        codes = extract_codes_from_push(datas)
+        if not codes:
+            # 无法识别，则按全量拉取但不分代码打印
+            codes = []
 
-        # 1) 尽量识别 symbol
-        sym = try_extract_symbol(data)
-        if not sym:
-            # 如果回调里没有明显的 symbol 字段，就标记为未知；同时尽量从订阅列表猜测
-            sym = 'UNKNOWN'
-
-        key = (sym, self.period)
-        with self.lock:
-            st = self.states[key]
-            st.seq += 1
-            seq = st.seq
-
-        # 2) 在回调内做一次拉取
-        t_before_pull = time.time()
-        pulled = xtdata.get_market_data_ex(
-            field_list=[],
-            stock_list=STOCK_LIST,
-            period=self.period,
-            count=1
-        )
+        # 在回调内拉取一次快照（包含订阅列表全部），方便从中切片出当前代码
+        pulled_raw = xtdata.get_market_data_ex(field_list=[],
+                                               stock_list=self.codes,
+                                               period=self.period,
+                                               count=1)
         t_pull = time.time()
         latency_ms = (t_pull - t_push) * 1000.0
 
-        # 3) 扁平化
-        push_flat = normalize_push_payload(data)
-        pull_flat_all = normalize_pull_payload(pulled)
+        # 统一规范化 + 字段清洗
+        push_all = canonize_fields(normalize_push_payload(datas))
+        pull_all = canonize_fields(normalize_pull_payload(pulled_raw))
 
-        # 若能确定 sym，在拉取结果中优先筛选与该 symbol 相关的键，避免“看不清重点”
-        if sym != 'UNKNOWN':
-            # 只保留以 "symbol." 开头的键
-            prefix = f"{sym}."
-            pull_flat = {k: v for k, v in pull_flat_all.items() if k.startswith(prefix)}
-            if not pull_flat:
-                # 如果没筛到，退回全量，避免信息缺失
-                pull_flat = pull_flat_all
-        else:
-            pull_flat = pull_flat_all
+        # 若 codes 非空：分别对每个代码打印一行；否则按“UNKNOWN”打印一次
+        target_codes = codes if codes else ["UNKNOWN"]
 
-        # 4) 打印
-        self._pretty_print_event(sym, push_flat, pull_flat, latency_ms, seq)
+        for sym in target_codes:
+            if sym == "UNKNOWN":
+                push_flat = push_all
+                pull_flat = pull_all
+            else:
+                pref = f"{sym}."
+                push_flat = {k: v for k, v in push_all.items() if k.startswith(pref)}
+                pull_flat = {k: v for k, v in pull_all.items() if k.startswith(pref)}
+                # 如果该代码在 push/pull 不存在（极少数异常），退回全量，避免丢失观测
+                if not push_flat:
+                    push_flat = push_all
+                if not pull_flat:
+                    pull_flat = pull_all
 
-        # 5) 写 CSV
-        row = {
-            'event_time': f"{t_push:.3f}",
-            'event_time_readable': time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t_push)),
-            'thread_id': thread_id,
-            'seq': seq,
-            'symbol': sym,
-            'period': self.period,
-            'pull_latency_ms': f"{latency_ms:.1f}",
-            'push_keys': " ".join(sorted(push_flat.keys())),
-            'pull_keys': " ".join(sorted(pull_flat.keys())),
-            'push_pull_diff_keys': " ".join(sorted(dict_diff(push_flat, pull_flat).keys())),
-            'push_brief': _shorten(push_flat),
-            'pull_brief': _shorten(pull_flat),
-        }
-        self._write_csv_row(row)
+            # 独立维护每个代码的 seq
+            key = (sym, self.period)
+            with self._lock:
+                st = self._states.setdefault(key, LastState())
+                st.seq += 1
+                seq = st.seq
+                st.last_push = push_flat
+                st.last_pull = pull_flat
+                st.last_event_ts = t_push
 
-        # 6) 更新 last_state（如需做“与上一次 push/pull 的变化”，可在此处对比 st.last_push / st.last_pull）
-        with self.lock:
-            st.last_push = push_flat
-            st.last_pull = pull_flat
-            st.last_event_ts = t_push
+            self._pretty_print(sym, push_flat, pull_flat, latency_ms, seq)
+
+    # ---------------- 生命周期 ----------------
+    def start(self):
+        """发起对 self.codes 的订阅；随后调用 run_loop() 进入事件循环。"""
+        for c in self.codes:
+            xtdata.subscribe_quote(c, period=self.period, count=self.count, callback=self.on_quote)
+
+    def run_loop(self):
+        """进入事件循环，阻塞主线程退出。"""
+        print(f"[ready] subscribed period={self.period}, count={self.count}, stocks={self.codes}")
+        print(f"[hint] CSV：{os.path.abspath(self.csv_path)}")
+        print("[hint] Ctrl+C 退出。")
+        xtdata.run()
 
 
-# ========== 主流程 ==========
 def main():
-    inspector = CallbackInspector(STOCK_LIST, PERIOD, CSV_PATH)
-
-    def _cb(data):
-        # 包一层，避免 xtdata 直接绑定实例方法在某些版本里出问题
-        inspector.on_quote(data)
-
-    # 同时订阅多个标的，便于观察“是否存在时差”
-    rid = xtdata.subscribe_quote(STOCK_LIST[0], period=PERIOD, callback=_cb)
-    rid2 = xtdata.subscribe_quote(STOCK_LIST[1], period=PERIOD, callback=_cb)
-
-    time.sleep(1.0)
-    print(f"[ready] subscribed rid={rid}, rid2={rid2}, period={PERIOD}, stocks={STOCK_LIST}")
-    print(f"[hint] 事件流水将写入 CSV：{os.path.abspath(CSV_PATH)}")
-    print(f"[hint] Ctrl+C 可退出。")
-
-    xtdata.run()  # 进入事件循环
+    insp = QuoteInspector(STOCK_LIST, PERIOD, COUNT, CSV_PATH)
+    insp.start()
+    insp.run_loop()
 
 
 if __name__ == "__main__":
