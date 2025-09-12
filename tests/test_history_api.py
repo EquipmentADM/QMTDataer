@@ -77,7 +77,7 @@ class TestHistoryAPI(unittest.TestCase):
         api = HistoryAPI(HistoryConfig())
         res = api.fetch_bars([
             "510050.SH"
-        ], "1m", "2025-01-01T09:30:00+08:00", "2025-01-01T09:40:00+08:00", return_data=False)
+        ], "1m", "2025-07-01T09:30:00+08:00", "2025-07-02T09:40:00+08:00", return_data=False)
         print(f"res:{res}")
         self.assertEqual(res["status"], "ok")
         self.assertEqual(res["count"], 10)

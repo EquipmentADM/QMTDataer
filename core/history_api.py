@@ -81,6 +81,13 @@ class HistoryAPI:
         start_yyyymmdd = s_dt.strftime("%Y%m%d")
         end_yyyymmdd = e_dt.strftime("%Y%m%d")
 
+        if period in ("1m", "1h"):
+            q_start = s_dt.strftime("%Y%m%d%H%M%S")
+            q_end = e_dt.strftime("%Y%m%d%H%M%S")
+        else:  # "1d"
+            q_start = start_yyyymmdd
+            q_end = end_yyyymmdd
+
         # 2) 先补齐
         self.cache.ensure_downloaded_date_range(codes, period, start_yyyymmdd, end_yyyymmdd, incrementally=True)
 
@@ -90,8 +97,8 @@ class HistoryAPI:
             field_list=[],
             stock_list=codes,
             period=period,
-            start_time=start_yyyymmdd,
-            end_time=end_yyyymmdd,
+            start_time=q_start,
+            end_time=q_end,
             count=-1,
             dividend_type=dividend_type,
             fill_data=self.cfg.fill_data_on_get,

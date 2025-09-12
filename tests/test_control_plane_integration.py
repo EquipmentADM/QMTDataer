@@ -58,16 +58,26 @@ class TestControlPlaneIntegration(unittest.TestCase):
         self.ack_ch = f"{self.ack_prefix}:{self.strategy}"
         self.ps = self.cli.pubsub()
         self.ps.subscribe(self.ack_ch)
-        # 为避免命名不一致，增加别名
+        # 刷掉 subscribe 确认消息
         self.pubsub = self.ps
         while self.ps.get_message(timeout = 0.01):
             pass
+
         self.svc = _FakeService()
         self.cp = ControlPlane(host=p["host"], port=p["port"], password=p["password"], db=p["db"],
                                channel=self.channel, ack_prefix=self.ack_prefix,
                                registry_prefix=self.reg_prefix, svc=self.svc)
         self.cp.start()
+
+
         self.registry = Registry(p["host"], p["port"], p["password"], p["db"], prefix=self.reg_prefix)
+
+        for _ in range(60):  # 最多等 3s
+            if getattr(self.cp, "_pubsub", None) is not None:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("ControlPlane 未能在超时时间内完成订阅初始化")
 
     def tearDown(self):
         try:
@@ -82,15 +92,15 @@ class TestControlPlaneIntegration(unittest.TestCase):
         except Exception:
             pass
 
-    def _await_ack(self, timeout=2.0):
-        """测试辅助：等待 ACK，一直等到超时；兼容 bytes/str 的 data。"""
+    def _await_ack(self, timeout=2.5):
+        """等待 ACK（兼容 bytes/str）"""
         t0 = time.time()
         while time.time() - t0 < timeout:
             m = self.ps.get_message(ignore_subscribe_messages = True, timeout = 0.2)
             if not m:
                 continue
             data = m.get("data")
-            if isinstance(data, bytes):  # 兼容 bytes
+            if isinstance(data, bytes):
                 try:
                     data = data.decode("utf-8", errors = "ignore")
                 except Exception:

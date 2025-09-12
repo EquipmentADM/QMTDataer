@@ -10,6 +10,8 @@
 import unittest
 from unittest import mock
 
+from xtquant import xtdata
+
 from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
 
 
@@ -44,19 +46,23 @@ class _NoopPublisher:
 
 
 class TestRealtimeDynamic(unittest.TestCase):
-    def setUp(self):
-        import core.realtime_service as mod
-        self.fake = _FakeXtData()
-        mod.xtdata = self.fake
+    def test_add_and_remove_real_xt(self):
+        # 1) 环境探测（最小订阅→退订），失败则跳过
+        try:
+            sid = xtdata.subscribe_quote(stock_code="000001.SZ", period="1d", count=0, callback=lambda *_: None)
+            if hasattr(xtdata, "unsubscribe_quote"):
+                xtdata.unsubscribe_quote("000001.SZ", "1d")
+        except Exception as e:
+            self.skipTest(f"MiniQMT/xtdata 不可用：{e}")
 
-    def test_add_and_remove(self):
+        # 2) 构造服务并执行 add/remove（不需要 run()）
         from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
-        fake = _FakeXtData()
         svc = RealtimeSubscriptionService(
-            RealtimeConfig(mode = "close_only", periods = ["1m", "1d"], codes = ["A"], preload_days = 0),
-            _NoopPublisher(), cache = _NoopCache()  # 关键：注入假 xt
+            RealtimeConfig(mode="close_only", periods=["1m","1d"], codes=["000001.SZ"], preload_days=0),
+            publisher=_NoopPublisher(),  # 你已有的空发布器
+            cache=_NoopCache()           # 你已有的空缓存
         )
-        svc.add_subscription(["A"], ["1m", "1d"], preload_days = 0)
-        self.assertEqual(len(fake.sub_calls), 2)
-        svc.remove_subscription(["A"], ["1m", "1d"])
-        self.assertEqual(len(fake.unsub_calls), 2)
+        svc.add_subscription(["000001.SZ"], ["1m","1d"], preload_days=0)
+        self.assertEqual(len(svc._subs), 2)
+        svc.remove_subscription(["000001.SZ"], ["1m","1d"])
+        self.assertEqual(len(svc._subs), 0)
