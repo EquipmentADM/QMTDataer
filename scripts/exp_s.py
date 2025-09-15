@@ -36,7 +36,7 @@ import pandas as pd
 from xtquant import xtdata  # 若你的环境是 from xtdata import xtdata，请自行调整
 
 # ======== 配置 ========
-STOCK_LIST: List[str] = ['510050.SH', '159915.SZ', '510330.SH']  # 支持1~10个，超出将报错
+STOCK_LIST: List[str] = ['510050.SH', '159915.SZ', '510330.SH', '510300.SH','513130.SH']  # 支持1~10个，超出将报错
 PERIOD: str = "1m"
 COUNT: int = -1                         # -1：只接收后续；1：预热一条
 CSV_PATH: str = "quote_events.csv"
