@@ -30,7 +30,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Optional
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+CN_TZ = timezone(timedelta(hours=8))
 
 # QMT xtdata
 try:
@@ -161,15 +163,58 @@ class RealtimeSubscriptionService:
                     if (c, p) not in self._subs:
                         continue
                     try:
-                        xtdata.unsubscribe_quote(c, p)
+                        xtdata.unsubscribe_quote(stock_code=c, period=p)
+                    except TypeError:
+                        try:
+                            xtdata.unsubscribe_quote(c)
+                        except Exception as e:
+                            self._log.warning("[RT] unsubscribe failed: %s %s err=%s", c, p, e)
+                            continue
                     except Exception as e:
-                        self._log.warning("[RT] 取消订阅异常: %s %s err=%s", c, p, e)
+                        self._log.warning("[RT] unsubscribe failed: %s %s err=%s", c, p, e)
+                        continue
                     self._subs.discard((c, p))
                     self._log.info("[RT] 订阅已移除: %s %s", c, p)
 
     # ----------------------------------------------------------------------
     # 订阅注册与回调处理
     # ----------------------------------------------------------------------
+    @staticmethod
+    def _normalize_bar_end_ts(raw: Any) -> Optional[str]:
+        if raw is None:
+            return None
+        try:
+            if isinstance(raw, (int, float)):
+                ts = float(raw)
+                if ts > 1e12:
+                    dt = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
+                else:
+                    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                return dt.astimezone(CN_TZ).isoformat()
+            s = str(raw).strip()
+            if not s:
+                return None
+            if s.isdigit():
+                if len(s) == 14:
+                    dt = datetime.strptime(s, "%Y%m%d%H%M%S").replace(tzinfo=CN_TZ)
+                    return dt.isoformat()
+                if len(s) == 8:
+                    dt = datetime.strptime(s, "%Y%m%d").replace(tzinfo=CN_TZ)
+                    return dt.isoformat()
+            if "T" not in s:
+                s = s.replace(" ", "T")
+            if s.endswith("Z"):
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            else:
+                if "+" not in s:
+                    s = f"{s}+08:00"
+                dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=CN_TZ)
+            return dt.astimezone(CN_TZ).isoformat()
+        except Exception:
+            return None
+
     def _register_one(self, code: str, period: str) -> None:
         """方法说明：注册单标的/单周期订阅（官方签名回调）
         功能：
@@ -210,6 +255,17 @@ class RealtimeSubscriptionService:
                 continue
             for row in rows:
                 payload = self._build_payload_from_row(code, period, row)
+                if not payload:
+                    continue
+                bar_iso = self._normalize_bar_end_ts(payload.get("bar_end_ts"))
+                if not bar_iso:
+                    continue
+                payload["bar_end_ts"] = bar_iso
+                if payload.get("is_closed") is None:
+                    payload["is_closed"] = True if self.cfg.mode == "close_only" else False
+                payload.setdefault("source", "qmt")
+                payload["recv_ts"] = datetime.now(CN_TZ).isoformat()
+
 
                 # 去重键：code + period + bar_end_ts（bar_end_ts 缺失则无法去重，直接跳过或直接推送）
                 # dkey = (payload.get("code"), payload.get("period"), payload.get("bar_end_ts"))

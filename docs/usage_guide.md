@@ -8,7 +8,7 @@
 - **PubSubPublisher (`core/pubsub_publisher.py`)**：将宽表 JSON 发布到 Redis PubSub 主题，带最小重试与指标计数。
 - **ControlPlane (`core/control_plane.py`)**：监听控制通道 `subscribe/status/unsubscribe` 命令，联动 `Registry` 与实时服务。
 - **Registry (`core/registry.py`)**：以 Redis 存储订阅规格，为重启恢复提供来源。
-- **HistoryAPI (`core/history_api.py`)**：封装“先补后取”的历史查询流程（`download_history_data` → `get_market_data` → 宽表）。
+- **HistoryAPI (`core/history_api.py`)**：封装“先补后取”的历史查询流程（`download_history_data` → `get_market_data_ex` → 宽表）。
 - **Metrics (`core/metrics.py`)**：线程安全的指标集合，兼容实例级计数并提供全局指标（`bars_published_total` 等）。
 - **HealthReporter (`core/health.py`)**：可选线程，周期性写入健康信息至 Redis。
 - **入口脚本 (`scripts/run_with_config.py`)**：解析配置、初始化上述组件并阻塞运行。
@@ -186,7 +186,7 @@ result = api.fetch_bars(
 - 摘要字段：`status`（固定 `ok`）、`count`（行数）、`gaps`（缺口时间列表）、`head_ts/tail_ts`（首尾）。
 
 ### 7.3 补齐策略
-`LocalCache.ensure_downloaded_date_range` 会按 `codes × period × 日期块` 调用 `download_history_data(..., incrementally=True)`，确保 `get_market_data` 能读取到本地库。
+`LocalCache.ensure_downloaded_date_range` 会按 `codes × period × 日期块` 调用 `download_history_data(..., incrementally=True)`，确保 `get_market_data_ex` 能读取到本地库。
 
 ## 8. 指标与健康采集
 - **实例指标**：通过 `Metrics().snapshot()` 获取 `published/publish_fail/dedup_hit`，用于健康上报或调试。

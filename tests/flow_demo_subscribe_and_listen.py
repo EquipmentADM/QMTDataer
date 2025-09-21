@@ -1,13 +1,8 @@
-﻿# -*- coding: utf-8 -*-
-"""从订阅到接收 Redis 推送的端到端演示脚本（需桥已运行，且 control.enabled=true）
+"""ControlPlane probe script.
 
-默认行为：
-    1. 使用 config/realtime.yml（若存在）中的 redis/control/topic 等设置；
-    2. 发送订阅并等待 ACK；
-    3. 自动进入行情监听（watch 模式），并在退出前自动退订；
-    4. 控制时长：--minutes（默认为 5 分钟）。
-
-命令行参数仍可覆盖默认行为。
+This helper publishes subscribe/status/unsubscribe commands, waits for ACKs,
+and can optionally watch the bar topic. Preload is forced to zero so the
+control-plane ACK is not delayed by history downloads.
 """
 from __future__ import annotations
 
@@ -20,12 +15,11 @@ from typing import List, Optional
 
 import redis
 
-
 _DEFAULT_CONFIG_PATH = Path("config/realtime.yml")
 
 
 def _load_defaults(config_path: Path) -> dict:
-    """从 YAML 配置中抓取默认 redis/control/subscription 设置"""
+    """方法说明：从配置文件读取默认连接与订阅参数"""
     if not config_path.exists():
         return {}
     try:
@@ -49,11 +43,13 @@ def _load_defaults(config_path: Path) -> dict:
 
 
 def _split_csv(text: str) -> List[str]:
+    """方法说明：把逗号分隔字符串拆成去空格的列表"""
     return [item.strip() for item in text.split(",") if item.strip()]
 
 
 def send_subscribe(cli, channel: str, strategy_id: str, codes, periods,
                    preload_days=None, topic=None, mode=None):
+    """方法说明：向控制通道发布 subscribe 命令"""
     payload = {
         "action": "subscribe",
         "strategy_id": strategy_id,
@@ -72,6 +68,7 @@ def send_subscribe(cli, channel: str, strategy_id: str, codes, periods,
 
 def send_unsubscribe(cli, channel: str, strategy_id: str,
                      sub_id: str = None, codes=None, periods=None):
+    """方法说明：向控制通道发布 unsubscribe 命令"""
     payload = {"action": "unsubscribe", "strategy_id": strategy_id}
     if sub_id:
         payload["sub_id"] = sub_id
@@ -83,6 +80,7 @@ def send_unsubscribe(cli, channel: str, strategy_id: str,
 
 
 def main():
+    """方法说明：脚本入口，完成订阅→监控→退订流程"""
     defaults = _load_defaults(_DEFAULT_CONFIG_PATH)
 
     parser = argparse.ArgumentParser(
@@ -92,11 +90,12 @@ def main():
     parser.add_argument("--ack-prefix", default=defaults.get("ack_prefix", "xt:ctrl:ack"))
     parser.add_argument("--topic", default=defaults.get("topic", "xt:topic:bar"))
     parser.add_argument("--strategy-id", default="demo")
-    parser.add_argument("--codes", default=defaults.get("codes", "518880.SH"))
+    parser.add_argument("--codes", default=defaults.get("codes", "510050.SH,159915.SZ"))
     parser.add_argument("--periods", default=defaults.get("periods", "1m"))
     parser.add_argument("--mode", default=defaults.get("mode"))
     parser.add_argument("--preload-days", type=int, default=defaults.get("preload_days", 1))
-    parser.add_argument("--ack-timeout", type=float, default=5.0)
+    parser.add_argument("--ack-timeout", type=float, default=120.0,
+                       help="等待订阅 ACK 的秒数，预热耗时较长时可调大")
     parser.add_argument("--minutes", type=int, default=5,
                        help="监听分钟数（默认 5 分钟）")
     parser.add_argument("--no-watch", action="store_true",
@@ -125,12 +124,12 @@ def main():
         pass
 
     print(f"[FLOW] redis={args.redis_url} ctrl={args.ctrl_channel} topic={args.topic}")
-    print(f"[FLOW] waiting ACK on {ack_ch} ...")
+    print(f"[FLOW] waiting ACK on {ack_ch} (timeout={args.ack_timeout}s)...")
 
     sub_id = None
     ack_deadline = time.time() + args.ack_timeout
     while time.time() < ack_deadline:
-        msg = ps.get_message(ignore_subscribe_messages=True, timeout=0.2)
+        msg = ps.get_message(ignore_subscribe_messages=True, timeout=0.5)
         if not msg:
             continue
         if msg.get("channel") != ack_ch:
@@ -145,7 +144,7 @@ def main():
             sub_id = ack.get("sub_id", sub_id)
         break
     else:
-        print("[FLOW] 未在超时时间内收到订阅 ACK")
+        print("[FLOW] 未在超时时间内收到订阅 ACK，可能预热仍在进行，可增加 --ack-timeout")
 
     if args.no_watch:
         if not args.no_unsubscribe and sub_id:

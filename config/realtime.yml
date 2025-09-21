@@ -25,8 +25,8 @@ redis:
 
 subscription:
   # 初始订阅集合（可在运行时通过 ControlPlane 动态增减）
-  codes: [518880.SH, 513880.SH]
-  periods: [1m, 1d]       # 当前实现支持 1m/1d（以及 1h，如你已在代码里开启）
+  codes: [510050.SH, 159915.SZ]
+  periods: [1m]       # 当前实现支持 1m/1d（以及 1h，如你已在代码里开启）
   mode: close_only        # close_only: 仅收盘（K线收敛）时推一次；forming_and_close: 生成中也推
   close_delay_ms: 100     # 收盘触发推送前延迟（毫秒，防抖用途）
   preload_days: 3         # 启动时预热历史天数（QMT 需先 download_history_data 才能 get）
