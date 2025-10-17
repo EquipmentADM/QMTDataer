@@ -55,11 +55,11 @@ def callandprint(data):
     print(f"kline_in_callabck:{kline_in_callabck}")
 
 getnum = xtdata.subscribe_quote('510050.SH', period='1m', callback=callandprint)
-getnum2 = xtdata.subscribe_quote('159915.SZ', period='1m', count=1, callback=callandprint)
-
-time.sleep(1)
-
-print(f"getnum: {getnum}")
-print(f"getnum2: {getnum2}")
-
-xtdata.run()
+# getnum2 = xtdata.subscribe_quote('159915.SZ', period='1m', count=1, callback=callandprint)
+#
+# time.sleep(1)
+#
+# print(f"getnum: {getnum}")
+# print(f"getnum2: {getnum2}")
+#
+# xtdata.run()

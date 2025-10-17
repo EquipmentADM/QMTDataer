@@ -26,6 +26,7 @@ import argparse
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Optional
 
 # 配置与日志
@@ -60,8 +61,8 @@ def build_demo_app_config() -> AppConfig:
             topic="xt:topic:bar",
         ),
         subscription=SubscriptionSection(
-            codes=["518880.SH", "513880.SH"],
-            periods=["1m", "1d"],
+            codes=["510050.SH", "159915.SZ"],
+            periods=["1m"],
             mode="close_only",
             close_delay_ms=100,
             preload_days=1,  # Demo 下默认预热 1 天更快
@@ -188,22 +189,23 @@ def run_from_config(cfg: AppConfig) -> None:
 
 
 def main(argv: Optional[list] = None) -> None:
-    """方法说明：解析参数，选择配置来源并启动"""
-    p = argparse.ArgumentParser(description="QMT 实时行情桥（配置化启动）")
-    p.add_argument("--config", help="YAML 配置文件路径", required=False)
-    args = p.parse_args(argv)
+    """Parse CLI arguments, load configuration, and bring up the realtime bridge."""
+    parser = argparse.ArgumentParser(description='QMT realtime bridge (config driven)')
+    parser.add_argument('--config', help='Path to YAML config file', required=False)
+    args = parser.parse_args(argv)
 
     if not args.config:
-        # 无参直跑：Demo 配置
-        print("\n[INFO] 未提供 --config，使用内置 Demo 配置启动（可设置 REDIS_URL 覆盖 Redis 地址）。")
-        print("       推荐：生产/联调请显式指定 --config 指向你的 YAML。\n")
+        default_cfg = Path('config/run_config.yml')
+        if default_cfg.exists():
+            cfg = load_config(str(default_cfg))
+            return run_from_config(cfg)
+        print('\n[INFO] No --config provided. Falling back to demo configuration (set REDIS_URL to override).')
+        print('       Hint: in production please pass --config explicitly.\n')
         cfg = build_demo_app_config()
         return run_from_config(cfg)
 
-    # 指定配置文件
     cfg = load_config(args.config)
     return run_from_config(cfg)
-
 
 if __name__ == "__main__":
     # 允许“直接运行”：

@@ -30,7 +30,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Optional
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, timezone
 
 CN_TZ = timezone(timedelta(hours=8))
 
@@ -335,52 +335,40 @@ class RealtimeSubscriptionService:
     # ----------------------------------------------------------------------
     # 构建“宽表”payload
     # ----------------------------------------------------------------------
-    def _build_payload_from_row(self, code: str, period: str, row: Dict[str, Any]) -> Dict[str, Any]:
-        """方法说明：将单条 QMT 回调数据标准化为“宽表”payload
-        字段约定（可能缺失则为 None）：
-            - code, period
-            - bar_end_ts：K线结束时间（原样透传 QMT 的 time 字段，可能为字符串或毫秒时间戳）
-            - is_closed：是否收盘（容错 isClosed/isClose/closed，多字段择优；默认 False）
-            - open, high, low, close, volume, amount
-            - preClose, suspendFlag, openInterest, settlementPrice
-        """
-        # 时间字段容错：'time' / 'Time' / 'barTime'
-        bar_ts = row.get("time", None)
-        if bar_ts is None:
-            bar_ts = row.get("Time", None)
-        if bar_ts is None:
-            bar_ts = row.get("barTime", None)
+    def _build_payload_from_row(self, code: str, period: str, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        raw_ts = row.get("time") or row.get("Time") or row.get("barTime") or row.get("bar_time")
+        bar_end_ts = self._normalize_bar_end_ts(raw_ts)
+        if bar_end_ts is None:
+            return None
 
-        # 收盘标记容错
-        is_closed = row.get("isClosed", None)
+        is_closed = row.get("isClosed")
         if is_closed is None:
-            is_closed = row.get("isClose", None)
+            is_closed = row.get("isClose")
         if is_closed is None:
-            is_closed = row.get("closed", None)
+            is_closed = row.get("closed")
         if is_closed is None:
-            is_closed = False  # 默认认为未收盘，避免在 close_only 中误推
+            is_closed = True if self.cfg.mode == "close_only" else False
 
         payload = {
             "code": code,
             "period": period,
-            "bar_end_ts": bar_ts,  # 保持原样，消费方可自行转 ISO 或毫秒
+            "bar_end_ts": bar_end_ts,
             "is_closed": bool(is_closed),
-
-            # 常见宽表字段
             "open": row.get("open"),
             "high": row.get("high"),
             "low": row.get("low"),
             "close": row.get("close"),
             "volume": row.get("volume"),
             "amount": row.get("amount"),
-
-            # 其他字段
             "preClose": row.get("preClose"),
             "suspendFlag": row.get("suspendFlag"),
             "openInterest": row.get("openInterest"),
             "settlementPrice": row.get("settlementPrice") or row.get("settelementPrice"),
+            "source": "qmt",
+            "recv_ts": datetime.now(CN_TZ).isoformat(),
         }
         return payload
+
 
     # ----------------------------------------------------------------------
     # 去重（LRU）

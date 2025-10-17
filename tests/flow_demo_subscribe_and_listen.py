@@ -1,9 +1,20 @@
-"""ControlPlane probe script.
+"""ControlPlane 探针脚本
 
-This helper publishes subscribe/status/unsubscribe commands, waits for ACKs,
-and can optionally watch the bar topic. Preload is forced to zero so the
-control-plane ACK is not delayed by history downloads.
+用途：
+    - 读取配置（config/realtime.yml）中的 Redis / 控制通道 / topic 等默认参数；
+    - 向行情桥控制通道发送 subscribe / status / unsubscribe 命令，验证控制面是否工作；
+    - 可选持续监听 ACK 通道与行情 topic，直接检查桥是否推送到 Redis；
+    - 退出时可自动退订，避免影响桥的订阅列表。
+使用方法：
+    python tests/flow_demo_subscribe_and_listen.py --no-watch   # 仅订阅并确认 ACK
+    python tests/flow_demo_subscribe_and_listen.py --watch      # 订阅 + 监听 ACK/BAR
+    python tests/flow_demo_subscribe_and_listen.py --no-watch --no-unsubscribe  # 订阅后保持，不退订
+注意事项：
+    - 本脚本不会启动行情桥，需要先运行 scripts/run_with_config.py（或 run_realtime_bridge.py）；
+    - 默认将 preload_days 置为 0，避免控制面等待历史预热；
+    - 如果在 --ack-timeout 内未收到 ACK，请检查桥日志或调大等待时间。
 """
+
 from __future__ import annotations
 
 import argparse
@@ -49,7 +60,7 @@ def _split_csv(text: str) -> List[str]:
 
 def send_subscribe(cli, channel: str, strategy_id: str, codes, periods,
                    preload_days=None, topic=None, mode=None):
-    """方法说明：向控制通道发布 subscribe 命令"""
+    """向控制通道发布 subscribe 命令"""
     payload = {
         "action": "subscribe",
         "strategy_id": strategy_id,
@@ -68,7 +79,7 @@ def send_subscribe(cli, channel: str, strategy_id: str, codes, periods,
 
 def send_unsubscribe(cli, channel: str, strategy_id: str,
                      sub_id: str = None, codes=None, periods=None):
-    """方法说明：向控制通道发布 unsubscribe 命令"""
+    """向控制通道发布 unsubscribe 命令"""
     payload = {"action": "unsubscribe", "strategy_id": strategy_id}
     if sub_id:
         payload["sub_id"] = sub_id
@@ -94,7 +105,7 @@ def main():
     parser.add_argument("--periods", default=defaults.get("periods", "1m"))
     parser.add_argument("--mode", default=defaults.get("mode"))
     parser.add_argument("--preload-days", type=int, default=defaults.get("preload_days", 1))
-    parser.add_argument("--ack-timeout", type=float, default=120.0,
+    parser.add_argument("--ack-timeout", type=float, default=5.0,
                        help="等待订阅 ACK 的秒数，预热耗时较长时可调大")
     parser.add_argument("--minutes", type=int, default=5,
                        help="监听分钟数（默认 5 分钟）")
