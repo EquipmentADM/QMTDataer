@@ -105,6 +105,19 @@ class SubscriptionSection:
 
 
 @dataclass
+class MockSection:
+    """类说明：Mock 行情配置段"""
+    enabled: bool = False
+    base_price: float = 10.0
+    volatility: float = 0.002
+    step_seconds: float = 1.0
+    seed: Optional[int] = None
+    volume_mean: float = 1_000_000
+    volume_std: float = 200_000
+    source: str = "mock"
+
+
+@dataclass
 class ControlSection:
     """类说明：控制面配置段
     功能：动态订阅命令通道、ACK 前缀与注册表前缀等；
@@ -136,6 +149,7 @@ class AppConfig:
     qmt: QMTSection = field(default_factory=QMTSection)
     redis: RedisSection = field(default_factory=RedisSection)
     subscription: SubscriptionSection = field(default_factory=SubscriptionSection)
+    mock: MockSection = field(default_factory=MockSection)
     logging: LoggingSection = field(default_factory=LoggingSection)
     control: ControlSection = field(default_factory=ControlSection)
     health: HealthSection = field(default_factory=HealthSection)
@@ -185,6 +199,7 @@ def load_config(path: str) -> AppConfig:
     qmt_raw = raw.get("qmt", {}) or {}
     redis_raw = raw.get("redis", {}) or {}
     sub_raw = raw.get("subscription", {}) or {}
+    mock_raw = raw.get("mock", {}) or {}
     log_raw = raw.get("logging", {}) or {}
     ctl_raw = raw.get("control", {}) or {}
     health_raw = raw.get("health", {}) or {}
@@ -246,6 +261,20 @@ def load_config(path: str) -> AppConfig:
         preload_days=preload_days,
     )
 
+    # --- Mock ---
+    mock_seed_raw = mock_raw.get("seed", None)
+    mock_seed = None if mock_seed_raw in (None, "") else int(mock_seed_raw)
+    mock_sec = MockSection(
+        enabled=bool(mock_raw.get("enabled", False)),
+        base_price=float(mock_raw.get("base_price", 10.0)),
+        volatility=float(mock_raw.get("volatility", 0.002)),
+        step_seconds=float(mock_raw.get("step_seconds", 1.0)),
+        seed=mock_seed,
+        volume_mean=float(mock_raw.get("volume_mean", 1_000_000)),
+        volume_std=float(mock_raw.get("volume_std", 200_000)),
+        source=str(mock_raw.get("source", "mock")),
+    )
+
     # --- Logging ---
     rotate_sec = None
     if isinstance(log_raw.get("rotate"), dict):
@@ -284,6 +313,7 @@ def load_config(path: str) -> AppConfig:
         qmt=qmt_sec,
         redis=redis_sec,
         subscription=sub_sec,
+        mock=mock_sec,
         logging=log_sec,
         control=ctl_sec,
         health=health_sec,

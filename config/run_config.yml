@@ -1,0 +1,41 @@
+qmt:
+  mode: none
+  token: ''
+
+redis:
+  url: "redis://127.0.0.1:6379/0"
+  host: 127.0.0.1
+  port: 6379
+  password: null
+  db: 0
+  topic: xt:topic:bar
+
+subscription:
+  codes: [510050.SH, 159915.SZ]
+  periods: [1m]
+  mode: close_only
+  close_delay_ms: 100
+  preload_days: 1
+
+logging:
+  level: INFO
+  json: false
+  file: logs/realtime_bridge.log
+  rotate:
+    enabled: true
+    max_bytes: 10485760
+    backup_count: 5
+
+health:
+  enabled: false
+  key_prefix: xt:bridge:health
+  interval_sec: 5
+  ttl_sec: 20
+  instance_tag: bridge-A
+
+control:
+  enabled: true
+  channel: xt:ctrl:sub
+  ack_prefix: xt:ctrl:ack
+  registry_prefix: xt:bridge
+  accept_strategies: []

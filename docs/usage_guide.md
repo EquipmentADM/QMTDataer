@@ -229,3 +229,47 @@ result = api.fetch_bars(
 | 调用历史 API | 参考 §7 Python 样例 |
 
 > 若后续扩展更多功能（如 forming 推送、ClickHouse 落库等），请同步更新此文档和契约文件 `docs/contract_v0.5.md`。
+## 13. Mock 行情模式
+
+当研发/联调环境无法接入 QMT/MiniQMT 时，可启用“全天假数据”模式，由系统自动生成随机游走的 bar 数据并推送到 Redis。核心思路：
+
+- 在配置中开启 mock.enabled=true，实时服务将跳过 QMT 连接并启动内置的 MockBarFeeder；
+- 每个订阅的 (code, period) 都会按随机游走生成 open/high/low/close 等字段，source 标记为 mock；
+- 生成节奏（step_seconds）、基准价、波动率、种子值等均可配置，方便复现。
+
+### 13.1 配置示例
+`yaml
+subscription:
+  codes: ["MOCK.SH"]
+  periods: ["1m"]
+  mode: close_only
+  preload_days: 0
+
+mock:
+  enabled: true
+  base_price: 15.0        # 初始价格
+  volatility: 0.002       # 对数收益标准差
+  step_seconds: 0.5       # 生成节奏（秒）
+  seed: 42                # 可选随机种子
+  volume_mean: 800000
+  volume_std: 120000
+`
+
+### 13.2 启动方式
+1. 使用现有入口：python scripts/run_with_config.py --config config/realtime_mock.yml。若 mock.enabled=true，脚本会自动跳过 QMT 连接并启用随机游走。
+2. 快速体验：python scripts/mock_mode_demo.py --codes MOCK.SH --periods 1m --minutes 2，适合临时演示或在 CI 中生成一小段模拟行情。
+
+### 13.3 搭配 Redis 后端测试
+1. 准备 Redis（本地或远程），确认 edis.url 可达。
+2. 启动 Mock 行情桥，例如：
+   `ash
+   python scripts/mock_mode_demo.py \
+       --redis-url redis://127.0.0.1:6379/0 \
+       --topic xt:topic:bar \
+       --codes MOCK1.SH,MOCK2.SH \
+       --periods 1m \
+       --minutes 5 \
+       --step-seconds 0.5
+   `
+3. 另起终端运行监听脚本：python scripts/simple_bar_listener.py --redis-url redis://127.0.0.1:6379/0 --pretty，可观察 source=mock 的 bar 持续推送。
+4. 如需测试控制面增删订阅，可继续使用 scripts/flow_demo_subscribe_and_listen.py，Mock 模式与真实模式共用协议。

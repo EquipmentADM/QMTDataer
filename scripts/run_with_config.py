@@ -32,7 +32,7 @@ from typing import Optional
 # 配置与日志
 from core.config_loader import (
     load_config,
-    AppConfig, QMTSection, RedisSection, SubscriptionSection,
+    AppConfig, QMTSection, RedisSection, SubscriptionSection, MockSection,
     LoggingSection, RotateSection, ControlSection, HealthSection
 )
 from core.logging_utils import setup_logging
@@ -67,6 +67,7 @@ def build_demo_app_config() -> AppConfig:
             close_delay_ms=100,
             preload_days=1,  # Demo 下默认预热 1 天更快
         ),
+        mock=MockSection(enabled=False),
         logging=LoggingSection(
             level="INFO",
             json=False,
@@ -103,14 +104,29 @@ def run_from_config(cfg: AppConfig) -> None:
         max_bytes=rotate.max_bytes,
         backup_count=rotate.backup_count
     )
-    logging.info("[BOOT] load config ok: codes=%d periods=%d mode=%s topic=%s",
+    logging.info("[BOOT] load config ok: codes=%d periods=%d mode=%s topic=%s mock=%s",
                  len(cfg.subscription.codes), len(cfg.subscription.periods),
-                 cfg.subscription.mode, cfg.redis.topic)
+                 cfg.subscription.mode, cfg.redis.topic,
+                 "on" if cfg.mock.enabled else "off")
 
-    # 2) 连接 QMT/MiniQMT（若 mode=none 仅做最小校验/加载 xtquant）
-    qc = QMTConnector(QMTConfig(mode=cfg.qmt.mode, token=cfg.qmt.token))
-    qc.listen_and_connect()
-    logging.info("[BOOT] QMT connector ok (mode=%s)", cfg.qmt.mode)
+    mock_cfg = RealtimeConfig.MockConfig(
+        enabled=cfg.mock.enabled,
+        base_price=cfg.mock.base_price,
+        volatility=cfg.mock.volatility,
+        step_seconds=cfg.mock.step_seconds,
+        seed=cfg.mock.seed,
+        volume_mean=cfg.mock.volume_mean,
+        volume_std=cfg.mock.volume_std,
+        source=cfg.mock.source,
+    )
+
+    # 2) 连接 QMT/MiniQMT（Mock 模式下可跳过）
+    if not mock_cfg.enabled:
+        qc = QMTConnector(QMTConfig(mode=cfg.qmt.mode, token=cfg.qmt.token))
+        qc.listen_and_connect()
+        logging.info("[BOOT] QMT connector ok (mode=%s)", cfg.qmt.mode)
+    else:
+        logging.info("[BOOT] mock mode active, skip QMT connector")
 
     # 3) Publisher
     publisher = PubSubPublisher(
@@ -126,6 +142,7 @@ def run_from_config(cfg: AppConfig) -> None:
         codes=cfg.subscription.codes,
         close_delay_ms=cfg.subscription.close_delay_ms,
         preload_days=cfg.subscription.preload_days,
+        mock=mock_cfg,
     )
     svc = RealtimeSubscriptionService(rt_cfg, publisher)
 
@@ -174,6 +191,10 @@ def run_from_config(cfg: AppConfig) -> None:
         svc.run_forever()
     finally:
         # 优雅退出
+        try:
+            svc.stop()
+        except Exception:
+            pass
         if ctrl_thr:
             try:
                 ctrl_thr.stop()
