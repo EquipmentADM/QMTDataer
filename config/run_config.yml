@@ -11,7 +11,7 @@ redis:
   topic: xt:topic:bar
 
 subscription:
-  codes: [510050.SH, 159915.SZ]
+  codes: [513880.SH, 518880.SH]
   periods: [1m]
   mode: close_only
   close_delay_ms: 100

@@ -110,7 +110,7 @@ class MockSection:
     enabled: bool = False
     base_price: float = 10.0
     volatility: float = 0.002
-    step_seconds: float = 1.0
+    step_seconds: float = 5.0
     seed: Optional[int] = None
     volume_mean: float = 1_000_000
     volume_std: float = 200_000

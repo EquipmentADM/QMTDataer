@@ -45,6 +45,8 @@ from core.control_plane import ControlPlane
 from core.health import HealthReporter
 from core.metrics import Metrics
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+
 
 # ----------------- Demo 配置构造 -----------------
 def build_demo_app_config() -> AppConfig:
@@ -216,7 +218,7 @@ def main(argv: Optional[list] = None) -> None:
     args = parser.parse_args(argv)
 
     if not args.config:
-        default_cfg = Path('config/run_config.yml')
+        default_cfg = BASE_DIR / 'config/run_config.yml'
         if default_cfg.exists():
             cfg = load_config(str(default_cfg))
             return run_from_config(cfg)

@@ -73,7 +73,7 @@ class RealtimeConfig:
         enabled: bool = False
         base_price: float = 10.0
         volatility: float = 0.002       # 对数收益标准差
-        step_seconds: float = 1.0       # 每根 bar 生成的时间间隔（秒）
+        step_seconds: float = 5.0       # 每根 bar 生成的时间间隔（秒）
         seed: Optional[int] = None
         volume_mean: float = 1_000_000
         volume_std: float = 200_000

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from core.config_loader import load_config
-from scripts.run_with_config import run_from_config, build_demo_app_config
+from scripts.run_with_config import run_from_config, build_demo_app_config, BASE_DIR
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -34,7 +34,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         cfg_path = Path(args.config)
         cfg = load_config(str(cfg_path))
     else:
-        default_cfg = Path("config/run_config.yml")
+        default_cfg = BASE_DIR / "config/run_config.yml"
         if default_cfg.exists():
             cfg_path = default_cfg
             cfg = load_config(str(default_cfg))
@@ -50,6 +50,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         cfg.mock.volatility = args.volatility
     if args.step_seconds is not None:
         cfg.mock.step_seconds = args.step_seconds
+    else:
+        cfg.mock.step_seconds = 5.0
     if args.seed is not None:
         cfg.mock.seed = args.seed
     if args.volume_mean is not None:
