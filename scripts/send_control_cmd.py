@@ -1,4 +1,4 @@
-# -*- codeing = utf-8 -*-
+# -*- coding = utf-8 -*-
 # @Time : 2025/9/10 22:55
 # @Author : EquipmentADV
 # @File : send_control_cmd.py

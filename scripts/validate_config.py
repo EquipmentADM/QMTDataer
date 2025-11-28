@@ -1,4 +1,4 @@
-# -*- codeing = utf-8 -*-
+# -*- coding = utf-8 -*-
 # @Time : 2025/9/10 14:27
 # @Author : EquipmentADV
 # @File : validate_config.py

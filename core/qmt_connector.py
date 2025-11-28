@@ -1,4 +1,4 @@
-# -*- codeing = utf-8 -*-
+# -*- coding = utf-8 -*-
 # @Time : 2025/9/9 15:09
 # @Author : EquipmentADV
 # @File : qmt_connector.py

@@ -1,4 +1,4 @@
-# -*- codeing = utf-8 -*-
+# -*- coding = utf-8 -*-
 # @Time : 2025/9/9 22:24
 # @Author : EquipmentADV
 # @File : local_cache.py

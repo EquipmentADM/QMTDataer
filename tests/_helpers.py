@@ -1,4 +1,4 @@
-# -*- codeing = utf-8 -*-
+# -*- coding = utf-8 -*-
 # @Time : 2025/9/11 11:50
 # @Author : EquipmentADV
 # @File : _helpers.py

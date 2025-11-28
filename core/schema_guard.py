@@ -1,4 +1,4 @@
-# -*- codeing = utf-8 -*-
+# -*- coding = utf-8 -*-
 # @Time : 2025/9/17 14:38
 # @Author : EquipmentADV
 # @File : schema_guard.py

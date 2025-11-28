@@ -1,4 +1,4 @@
-# -*- codeing = utf-8 -*-
+# -*- coding = utf-8 -*-
 # @Time : 2025/9/9 16:55
 # @Author : EquipmentADV
 # @File : exp.py

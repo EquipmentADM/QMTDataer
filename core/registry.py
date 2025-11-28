@@ -1,4 +1,4 @@
-# -*- codeing = utf-8 -*-
+# -*- coding = utf-8 -*-
 # @Time : 2025/9/10 22:51
 # @Author : EquipmentADV
 # @File : registry.py
