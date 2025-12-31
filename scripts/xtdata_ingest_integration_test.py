@@ -17,6 +17,7 @@ Notes:
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
@@ -31,6 +32,7 @@ from core.xtdata_source import XtdataSource  # noqa: E402
 from core.ingestor import MarketDataIngestor  # noqa: E402
 from core.storage_simple import FinancialDataStorage  # noqa: E402
 
+CN_TZ = timezone(timedelta(hours=8))
 DEFAULT_ROOT = "D:/Work/Quant/financial_database"
 DEFAULT_CYCLES = ["1d", "1m"]
 DEFAULT_SYMBOLS: List[str] = [
@@ -111,6 +113,8 @@ def _probe_xtdata(xtdata_mod, symbol: str, cycle: str, start: str, end: str) -> 
     if not isinstance(data_dict, dict) or not data_dict:
         print("[ERROR] 探测失败：返回为空，可能未连接 miniqmt 或无行情权限")
         return False
+
+    print(data_dict[symbol])
 
     # 兼容两种结构
     if "time" in data_dict:
@@ -194,7 +198,7 @@ def run_ingest(
         market (str): 市场名称。
         specific (str): 合成标记/子目录。
         start (str): 起始时间（xtdata 格式）。
-        end (str): 结束时间。
+        end (str): 结束时间，传空则默认使用“当前日期+1天”。
         skip_download (bool): 是否跳过 download_history_data。
         auto_start (bool): 是否基于已有文件最新时间回溯 lookback 条作为 start。
         lookback (int): 回溯条数。
@@ -205,7 +209,10 @@ def run_ingest(
 
     probe_symbol = next(iter(symbols))
     probe_cycle = next(iter(cycles))
-    if not _probe_xtdata(xtdata_mod, probe_symbol, probe_cycle, start, end):
+    # 若 end 为空，默认用“当前日期+1天”
+    end_use = end or (pd.Timestamp.now(tz=CN_TZ) + pd.Timedelta(days=1)).strftime("%Y%m%d")
+
+    if not _probe_xtdata(xtdata_mod, probe_symbol, probe_cycle, start, end_use):
         sys.exit(1)
 
     storage = FinancialDataStorage(root_dir=root)
@@ -217,12 +224,15 @@ def run_ingest(
         source = XtdataSource(xtdata=xtdata_mod, download=not skip_download)
         for symbol in symbols:
             start_use = start
+            existed_rows = None
+            file_path = None
             if auto_start:
                 target_dir = storage._build_target_dir(market, symbol, cycle, specific)
                 filename = storage._build_filename(market, symbol, cycle, specific, "csv")
                 file_path = Path(target_dir) / filename
                 if file_path.exists():
                     try:
+                        existed_rows = len(pd.read_csv(file_path))
                         df_exist = pd.read_csv(file_path, usecols=["time"])
                         if not df_exist.empty:
                             latest = pd.to_datetime(df_exist["time"], errors="coerce").dropna().max()
@@ -247,7 +257,7 @@ def run_ingest(
                     cycle=cycle,
                     specific=specific,
                     start=start_use,
-                    end=end,
+                    end=end_use,
                     file_type="csv",
                     time_column="time",
                     merge=True,
@@ -255,7 +265,18 @@ def run_ingest(
                 ok, reason = _validate_file(Path(out_path))
                 if ok:
                     ok_files.append(Path(out_path))
-                    print(f"[OK] 写入完成: {out_path}")
+                    added = None
+                    total = None
+                    try:
+                        total = len(pd.read_csv(out_path))
+                        if existed_rows is not None:
+                            added = max(0, total - existed_rows)
+                    except Exception:
+                        pass
+                    if added is not None and total is not None:
+                        print(f"[OK] 写入完成: {out_path} 新增={added} 总计={total}")
+                    else:
+                        print(f"[OK] 写入完成: {out_path}")
                 else:
                     failed.append(f"{symbol}-{cycle}: {reason}")
                     print(f"[FAIL] 校验失败 {symbol}-{cycle}: {reason}")
@@ -279,24 +300,24 @@ def run_ingest(
 
 if __name__ == "__main__":
     # ---- 示例 1：快速增量更新（建议默认用这个）----
-    run_ingest(
-        symbols=DEFAULT_SYMBOLS,
-        cycles=["1d", "1m"],
-        root=DEFAULT_ROOT,
-        start="20000101",
-        end="",
-        skip_download=True,            # 不调用 download_history_data，直接 get
-        auto_start=True,               # 基于已有文件时间回溯 lookback 个 bar
-        lookback=10,
-    )
-
-    # ---- 示例 2：全量拉取（需要时取消注释）----
     # run_ingest(
     #     symbols=DEFAULT_SYMBOLS,
     #     cycles=["1d", "1m"],
     #     root=DEFAULT_ROOT,
     #     start="20000101",
     #     end="",
-    #     skip_download=False,
-    #     auto_start=False,
+    #     skip_download=False,            # 不调用 download_history_data，直接 get
+    #     auto_start=True,               # 基于已有文件时间回溯 lookback 个 bar
+    #     lookback=20,
     # )
+
+    # ---- 示例 2：全量拉取（需要时取消注释）----
+    run_ingest(
+        symbols=DEFAULT_SYMBOLS,
+        cycles=["1d", "1m"],
+        root=DEFAULT_ROOT,
+        start="20000101",
+        end="",
+        skip_download=False,
+        auto_start=False,
+    )

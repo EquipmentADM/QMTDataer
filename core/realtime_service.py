@@ -34,6 +34,9 @@ from typing import Dict, Any, List, Tuple, Optional
 from collections import deque
 from datetime import datetime, timedelta, timezone, timezone
 
+import numpy as np
+import pandas as pd
+
 CN_TZ = timezone(timedelta(hours=8))
 
 # QMT xtdata
@@ -109,6 +112,7 @@ class MockBarFeeder(threading.Thread):
     class _State:
         last_dt: Optional[datetime] = None
         last_price: Optional[float] = None
+        vol: Optional[float] = None
 
     _PERIOD_SECONDS = {
         "1m": 60,
@@ -125,6 +129,7 @@ class MockBarFeeder(threading.Thread):
         self._stop_evt = threading.Event()
         self._states: Dict[Tuple[str, str], MockBarFeeder._State] = {}
         self._rng = random.Random(cfg.seed)
+        self._code_params: Dict[str, float] = {}  # per-code fallback 波动率
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -165,14 +170,23 @@ class MockBarFeeder(threading.Thread):
             state = self._states.setdefault((code, period), MockBarFeeder._State())
             if state.last_dt is None or state.last_price is None:
                 base_dt = self._align_base(now, delta) - delta
-                base_price = self._initial_price(code)
+                # 尝试基于历史行情初始化价格/波动率
+                hist_base = self._history_baseline(code, period)
+                if hist_base:
+                    base_price, hist_vol = hist_base
+                    state.vol = self._vol_for_code(code, hist_vol)
+                    self._log.info("[Mock] %s %s 使用历史基准 base=%.4f vol=%.6f", code, period, base_price, state.vol)
+                else:
+                    base_price = self._initial_price(code)
+                    state.vol = self._vol_for_code(code, None)
+                    self._log.info("[Mock] %s %s 历史获取失败，使用默认基准 base=%.4f vol=%.6f", code, period, base_price, state.vol)
                 seed_row = self._build_row(code, period, base_dt, base_price, close_price=base_price)
                 self._svc._on_datas(period, {code: [seed_row]})
                 state.last_dt = base_dt
                 state.last_price = base_price
 
             next_dt = state.last_dt + delta
-            next_price = self._next_price(state.last_price)
+            next_price = self._next_price(state.last_price, state.vol)
             row = self._build_row(code, period, next_dt, state.last_price, close_price=next_price)
             state.last_dt = next_dt
             state.last_price = next_price
@@ -197,10 +211,99 @@ class MockBarFeeder(threading.Thread):
         base = max(0.01, self._cfg.base_price + jitter)
         return round(base, 4)
 
-    def _next_price(self, prev: float) -> float:
-        drift = self._rng.gauss(0, self._cfg.volatility)
+    def _next_price(self, prev: float, vol: Optional[float]) -> float:
+        sigma = vol if vol is not None else self._cfg.volatility
+        drift = self._rng.gauss(0, sigma)
         price = prev * math.exp(drift)
         return round(max(0.01, price), 4)
+
+    def _history_baseline(self, code: str, period: str) -> Optional[Tuple[float, Optional[float]]]:
+        """尝试从 xtdata 读取近期行情，提取最新价与波动率；失败则返回 None。"""
+        if xtdata is None:
+            return None
+        # 先尝试下载近期数据以提升命中率（失败忽略）
+        try:
+            end_s = datetime.now(CN_TZ).strftime("%Y%m%d")
+            start_s = (datetime.now(CN_TZ) - timedelta(days=60)).strftime("%Y%m%d")
+            xtdata.download_history_data(
+                stock_code=code,
+                period=period,
+                start_time=start_s,
+                end_time=end_s,
+                incrementally=True,
+            )
+        except Exception:
+            pass
+        data = None
+        # 首选 get_market_data_ex
+        try:
+            data = xtdata.get_market_data_ex(
+                stock_list=[code],
+                period=period,
+                start_time="",
+                end_time="",
+                count=50,
+                dividend_type="none",
+                fill_data=False,
+                field_list=[],
+            )
+        except Exception:
+            data = None
+        # 回退 get_market_data
+        if not isinstance(data, dict) or not data:
+            try:
+                data = xtdata.get_market_data(
+                    stock_list=[code],
+                    period=period,
+                    start_time="",
+                    end_time="",
+                    count=50,
+                    dividend_type="none",
+                    fill_data=False,
+                    field_list=[],
+                )
+            except Exception as e:
+                self._log.debug("mock feeder history fetch failed: %s %s err=%s", code, period, e)
+                data = None
+        if not isinstance(data, dict) or not data:
+            return None
+
+        closes: List[float] = []
+        # 结构 1：field->DataFrame
+        if "close" in data and "time" in data:
+            close_df = data.get("close")
+            if hasattr(close_df, "loc") and code in close_df.index:
+                series = close_df.loc[code]
+                closes = [float(x) for x in series.dropna().tolist() if pd.notna(x)]
+        else:
+            # 结构 2：code->DataFrame（index 通常为日期/时间，不含 code）
+            for val in data.values():
+                if isinstance(val, pd.DataFrame) and "close" in val.columns:
+                    closes = [float(x) for x in val["close"].dropna().tolist() if pd.notna(x)]
+                    break
+        if not closes:
+            return None
+        base_price = closes[-1]
+        vol = None
+        if len(closes) >= 3:
+            try:
+                rets = np.diff(np.log(np.array(closes)))
+                if len(rets) > 0:
+                    vol = float(np.std(rets))
+            except Exception:
+                vol = None
+        return base_price, vol
+
+    def _vol_for_code(self, code: str, hist_vol: Optional[float]) -> float:
+        """返回单标的使用的波动率：优先历史估计，否则对默认波动率做 per-code 抖动。"""
+        if hist_vol is not None and hist_vol > 0:
+            return hist_vol
+        if code in self._code_params:
+            return self._code_params[code]
+        factor = 0.5 + (abs(hash(code)) % 101) / 100.0  # 0.5 ~ 1.51
+        vol = max(1e-6, self._cfg.volatility * factor)
+        self._code_params[code] = vol
+        return vol
 
     def _build_row(self, code: str, period: str, bar_dt: datetime, open_price: float, close_price: float) -> Dict[str, Any]:
         spread = abs(close_price - open_price) or 0.01
@@ -211,8 +314,9 @@ class MockBarFeeder(threading.Thread):
         low = round(max(0.01, min(low, open_price, close_price)), 4)
         volume = max(1, int(abs(self._rng.gauss(self._cfg.volume_mean, self._cfg.volume_std))))
         amount = round(close_price * volume, 2)
+        ts_str = bar_dt.astimezone(CN_TZ).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S")
         return {
-            "time": bar_dt.isoformat(),
+            "time": ts_str,
             "code": code,
             "period": period,
             "open": round(open_price, 4),
@@ -390,17 +494,20 @@ class RealtimeSubscriptionService:
                     dt = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
                 else:
                     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                return dt.astimezone(CN_TZ).isoformat()
+                dt = dt.astimezone(CN_TZ).replace(tzinfo=None)
+                return dt.strftime("%Y-%m-%dT%H:%M:%S")
             s = str(raw).strip()
             if not s:
                 return None
             if s.isdigit():
                 if len(s) == 14:
                     dt = datetime.strptime(s, "%Y%m%d%H%M%S").replace(tzinfo=CN_TZ)
-                    return dt.isoformat()
+                    dt = dt.astimezone(CN_TZ).replace(tzinfo=None)
+                    return dt.strftime("%Y-%m-%dT%H:%M:%S")
                 if len(s) == 8:
                     dt = datetime.strptime(s, "%Y%m%d").replace(tzinfo=CN_TZ)
-                    return dt.isoformat()
+                    dt = dt.astimezone(CN_TZ).replace(tzinfo=None)
+                    return dt.strftime("%Y-%m-%dT%H:%M:%S")
             if "T" not in s:
                 s = s.replace(" ", "T")
             if s.endswith("Z"):
@@ -411,7 +518,8 @@ class RealtimeSubscriptionService:
                 dt = datetime.fromisoformat(s)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=CN_TZ)
-            return dt.astimezone(CN_TZ).isoformat()
+            dt = dt.astimezone(CN_TZ).replace(tzinfo=None)
+            return dt.strftime("%Y-%m-%dT%H:%M:%S")
         except Exception:
             return None
 
@@ -544,7 +652,7 @@ class RealtimeSubscriptionService:
             return
         enriched = dict(payload)
         enriched.setdefault("source", "qmt")
-        enriched["recv_ts"] = datetime.now(CN_TZ).isoformat()
+        enriched["recv_ts"] = datetime.now(CN_TZ).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S")
         self.publisher.publish(enriched)
         with self._lock:
             self._last_pub_ts[(code, period)] = time.time()
