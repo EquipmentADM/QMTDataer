@@ -58,6 +58,17 @@ class FinancialDataStorage:
             "1d": ["1d", "1D", "1day", "1Day", "1DAY", "1DaY"],
         }
     )
+    _cycle_dir_map: Dict[str, str] = field(
+        default_factory=lambda: {
+            "1m": "1min",
+            "5m": "5min",
+            "15m": "15min",
+            "30m": "30min",
+            # 小时/日不改动
+            "1h": "1h",
+            "1d": "1d",
+        }
+    )
     specific_mapping: Dict[str, List[str]] = field(
         default_factory=lambda: {
             "主力连续": ["主力连续", "主力", "主连", "Main", "continuous_main"],
@@ -119,6 +130,32 @@ class FinancialDataStorage:
         """统一文件扩展名写法，补充前导点。"""
         return file_type if file_type.startswith(".") else f".{file_type}"
 
+    @staticmethod
+    def _parse_time_series(series: pd.Series) -> pd.Series:
+        """
+        统一解析时间列：
+          - 数值型：根据数量级自动选择秒/毫秒
+          - 字符串/对象：使用 pandas to_datetime 解析
+        返回 tz-naive 的 datetime64[ns] 序列，解析失败为 NaT。
+        """
+        s = series
+        if pd.api.types.is_numeric_dtype(s):
+            # 判断数量级：>=1e12 视为毫秒，>=1e9 视为秒
+            max_abs = s.dropna().abs().max() if len(s.dropna()) > 0 else 0
+            unit = "ms" if max_abs >= 1e12 else "s" if max_abs >= 1e9 else None
+            if unit:
+                parsed = pd.to_datetime(s, errors="coerce", unit=unit)
+            else:
+                parsed = pd.to_datetime(s, errors="coerce")
+        else:
+            parsed = pd.to_datetime(s, errors="coerce")
+        # 去除时区信息
+        try:
+            parsed = parsed.dt.tz_localize(None)
+        except Exception:
+            pass
+        return parsed
+
     def _build_filename(
         self,
         market: str,
@@ -129,6 +166,7 @@ class FinancialDataStorage:
     ) -> str:
         """生成单文件名，遵循原始命名规则。"""
         ext = self._normalize_extension(file_type)
+        cycle_dir = self._cycle_dir_map.get(cycle, cycle)
         if market == "Futures_data":
             if specific in self.specific_list and specific != "888":
                 return f"{symbol}{specific}合成{ext}"
@@ -139,12 +177,13 @@ class FinancialDataStorage:
                 raise ValueError(f"无效的specific 参数: {specific}")
             return f"{symbol}{re_res.group(2)}{ext}"
         if market in {"Crypto_data", "Index_data", "SS_stock_data", "US_stock_data", "H_stock_data"}:
-            return f"{symbol}_{cycle}{ext}"
+            return f"{symbol}_{cycle_dir}{ext}"
         raise ValueError(f"暂未支持的market: {market}")
 
     def _build_target_dir(self, market: str, symbol: str, cycle: str, specific: str) -> str:
         """构造目标目录并确保存在。"""
-        path = Path(self.root_dir) / market / symbol / cycle
+        cycle_dir = self._cycle_dir_map.get(cycle, cycle)
+        path = Path(self.root_dir) / market / symbol / cycle_dir
         if specific:
             path = path / specific
         path.mkdir(parents=True, exist_ok=True)
@@ -208,10 +247,7 @@ class FinancialDataStorage:
         for col in time_columns:
             if col not in df_out.columns:
                 continue
-            ts = pd.to_datetime(df_out[col], errors="coerce")
-            # 统一为无时区，避免 tz-aware 与 naive 比较报错
-            if hasattr(ts.dt, "tz_localize"):
-                ts = ts.dt.tz_localize(None)
+            ts = self._parse_time_series(df_out[col])
             mask = pd.Series(True, index=df_out.index)
             sd = pd.to_datetime(start_date, errors="coerce") if start_date else None
             ed = pd.to_datetime(end_date, errors="coerce") if end_date else None
@@ -271,15 +307,44 @@ class FinancialDataStorage:
             except Exception:
                 existing = pd.DataFrame()
 
+        # 解析时间列，记录调试信息
+        existing_rows = len(existing)
+        new_rows = len(new_df)
+        exist_time_range = (None, None)
+        new_time_range = (None, None)
+        if time_column in existing.columns:
+            exist_parsed = self._parse_time_series(existing[time_column])
+            if not exist_parsed.dropna().empty:
+                exist_time_range = (exist_parsed.min(), exist_parsed.max())
+            existing[time_column] = exist_parsed
+        if time_column in new_df.columns:
+            new_parsed = self._parse_time_series(new_df[time_column])
+            if not new_parsed.dropna().empty:
+                new_time_range = (new_parsed.min(), new_parsed.max())
+            new_df = new_df.copy()
+            new_df[time_column] = new_parsed
+
         # 统一时间列并合并
         frames = [existing, new_df]
         merged = pd.concat(frames, ignore_index=True)
         if time_column in merged.columns:
-            merged[time_column] = pd.to_datetime(merged[time_column], errors="coerce").dt.tz_localize(None)
+            merged[time_column] = self._parse_time_series(merged[time_column])
             if dropna_time:
                 merged = merged.dropna(subset=[time_column])
             merged = merged.drop_duplicates(subset=[time_column], keep="last" if prefer_new else "first")
             merged = merged.sort_values(by=time_column)
+            # 再次记录合并后的时间范围
+            merged_time = merged[time_column]
+            merged_time_range = (None, None)
+            if not merged_time.dropna().empty:
+                merged_time_range = (merged_time.min(), merged_time.max())
+            print(f"[DEBUG merge] existing={existing_rows} {exist_time_range}, new={new_rows} {new_time_range}, merged={len(merged)} {merged_time_range}")
+            # 将时间列标准化为无时区的 ISO 字符串
+            try:
+                merged[time_column] = pd.to_datetime(merged[time_column], errors="coerce").dt.tz_localize(None)
+                merged[time_column] = merged[time_column].dt.strftime("%Y-%m-%dT%H:%M:%S")
+            except Exception:
+                pass
 
         # 保存
         self._save_dataframe(

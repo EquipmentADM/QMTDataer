@@ -62,6 +62,11 @@ DEFAULT_SYMBOLS: List[str] = [
     "513600.SH",
     "159119.SZ",
 ]
+DEFAULT_SYMBOL_TEST: List[str] = [
+    "513880.SH",
+    "518880.SH",
+    "000001.SH",
+]
 
 
 def _import_xtdata():
@@ -226,14 +231,22 @@ def run_ingest(
             start_use = start
             existed_rows = None
             file_path = None
+            exist_time_min = None
+            exist_time_max = None
             if auto_start:
                 target_dir = storage._build_target_dir(market, symbol, cycle, specific)
                 filename = storage._build_filename(market, symbol, cycle, specific, "csv")
                 file_path = Path(target_dir) / filename
                 if file_path.exists():
                     try:
-                        existed_rows = len(pd.read_csv(file_path))
-                        df_exist = pd.read_csv(file_path, usecols=["time"])
+                        df_exist_full = pd.read_csv(file_path)
+                        existed_rows = len(df_exist_full)
+                        if "time" in df_exist_full.columns:
+                            exist_times = pd.to_datetime(df_exist_full["time"], errors="coerce").dropna()
+                            if not exist_times.empty:
+                                exist_time_min = exist_times.min()
+                                exist_time_max = exist_times.max()
+                        df_exist = df_exist_full
                         if not df_exist.empty:
                             latest = pd.to_datetime(df_exist["time"], errors="coerce").dropna().max()
                             if pd.notna(latest):
@@ -249,6 +262,17 @@ def run_ingest(
                         pass
 
             print(f"[RUN] 拉取 {symbol} {cycle} ...")
+            def _log_preprocess(df: pd.DataFrame) -> pd.DataFrame:
+                tcol = "time"
+                try:
+                    times = pd.to_datetime(df[tcol], errors="coerce").dropna()
+                    if not times.empty:
+                        print(f"[DEBUG] fetch {symbol} {cycle}: rows={len(df)} time_range=[{times.min()} ~ {times.max()}]")
+                    else:
+                        print(f"[DEBUG] fetch {symbol} {cycle}: rows={len(df)} time列为空")
+                except Exception as e:
+                    print(f"[DEBUG] fetch {symbol} {cycle}: 统计时间范围失败 {e}")
+                return df
             try:
                 out_path = ingestor.ingest_symbol(
                     source=source,
@@ -261,6 +285,7 @@ def run_ingest(
                     file_type="csv",
                     time_column="time",
                     merge=True,
+                    preprocess=_log_preprocess,
                 )
                 ok, reason = _validate_file(Path(out_path))
                 if ok:
@@ -271,6 +296,8 @@ def run_ingest(
                         total = len(pd.read_csv(out_path))
                         if existed_rows is not None:
                             added = max(0, total - existed_rows)
+                        if exist_time_min is not None or exist_time_max is not None:
+                            print(f"[DEBUG] existed rows={existed_rows} range=[{exist_time_min} ~ {exist_time_max}]")
                     except Exception:
                         pass
                     if added is not None and total is not None:
