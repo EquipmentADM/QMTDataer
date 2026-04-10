@@ -188,6 +188,39 @@ result = api.fetch_bars(
 ### 7.3 补齐策略
 `LocalCache.ensure_downloaded_date_range` 会按 `codes × period × 日期块` 调用 `download_history_data(..., incrementally=True)`，确保 `get_market_data_ex` 能读取到本地库。
 
+### 7.4 入库脚本默认周期与期货分钟历史说明
+当前仓库中的三类一键入库脚本：
+
+- `scripts/xtdata_ingest_full.py`
+- `scripts/xtdata_ingest_backfill.py`
+- `scripts/xtdata_ingest_recent.py`
+
+默认都使用相同周期集合：
+
+- `1d`
+- `1m`
+
+其中：
+
+- 取数阶段仍向 xtdata 传入 `1m`
+- 落盘到 FD 路径时会标准化为 `1min`
+- `1d` 落盘时保持为 `1d`
+
+期货分钟历史的可取范围需要特别说明：
+
+- 截至 `2026-04-08` 的本地实测结果，期货主力连续 `1m` 历史通常大致可取到近 1 年左右，不应默认假设可以稳定拉取十多年分钟历史。
+- 例如 `i00.DF` 在 `period='1m'`、区间 `20250301 ~ 20260409` 的实测结果为：
+  - 行数约 `83474`
+  - 起始时间约 `2025-04-08 01:00:00`
+  - 结束时间约 `2026-04-08 07:00:00`
+- 对比样例 `rb00.SF` 在相近窗口下也表现为近 1 年量级，而非全历史分钟数据。
+
+使用建议：
+
+- 期货 `1d` 可按较长起点做全量补齐；
+- 期货 `1m` 更适合按“近 1 年左右”或增量方式运行；
+- 若直接对期货 `1m` 使用极早的起始时间（如 `20000101`），不同品种和环境下可能出现空表或不稳定返回，不应将其视为数据缺失的唯一判断依据。
+
 ## 8. 指标与健康采集
 - **实例指标**：通过 `Metrics().snapshot()` 获取 `published/publish_fail/dedup_hit`，用于健康上报或调试。
 - **全局指标**：`Metrics.snapshot_global()` 返回 `bars_published_total/schema_drop_total/late_bars_total`。

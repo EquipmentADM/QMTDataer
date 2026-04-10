@@ -135,7 +135,7 @@ class FinancialDataStorage:
         """
         统一解析时间列：
           - 数值型：根据数量级自动选择秒/毫秒
-          - 字符串/对象：使用 pandas to_datetime 解析
+          - 字符串/对象：分段按常见格式解析，剩余值逐条兜底解析
         返回 tz-naive 的 datetime64[ns] 序列，解析失败为 NaT。
         """
         s = series
@@ -148,12 +148,61 @@ class FinancialDataStorage:
             else:
                 parsed = pd.to_datetime(s, errors="coerce")
         else:
-            parsed = pd.to_datetime(s, errors="coerce")
-        # 去除时区信息
+            # ---- 分段解析，避免混合格式触发全量逐条推断警告 ----
+            s_str = s.astype("string").str.strip()
+            parsed = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
+
+            non_empty = s_str.notna() & (s_str != "")
+            if non_empty.any():
+                # 1) 纯数字时间
+                m14 = non_empty & s_str.str.fullmatch(r"\d{14}")
+                if m14.any():
+                    parsed.loc[m14] = pd.to_datetime(s_str.loc[m14], format="%Y%m%d%H%M%S", errors="coerce")
+
+                m8 = non_empty & s_str.str.fullmatch(r"\d{8}")
+                if m8.any():
+                    parsed.loc[m8] = pd.to_datetime(s_str.loc[m8], format="%Y%m%d", errors="coerce")
+
+                m13 = non_empty & s_str.str.fullmatch(r"\d{13}")
+                if m13.any():
+                    parsed.loc[m13] = pd.to_datetime(
+                        pd.to_numeric(s_str.loc[m13], errors="coerce"), unit="ms", errors="coerce"
+                    )
+
+                m10 = non_empty & s_str.str.fullmatch(r"\d{10}")
+                if m10.any():
+                    parsed.loc[m10] = pd.to_datetime(
+                        pd.to_numeric(s_str.loc[m10], errors="coerce"), unit="s", errors="coerce"
+                    )
+
+                # 2) 常见字符串格式
+                formats = (
+                    "%Y-%m-%dT%H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y/%m/%d %H:%M:%S",
+                    "%Y-%m-%d",
+                    "%Y/%m/%d",
+                )
+                for fmt in formats:
+                    remain = non_empty & parsed.isna()
+                    if not remain.any():
+                        break
+                    parsed.loc[remain] = pd.to_datetime(s_str.loc[remain], format=fmt, errors="coerce")
+
+                # 3) 兜底逐条解析（仅剩余未命中项，数量通常很少）
+                remain = non_empty & parsed.isna()
+                if remain.any():
+                    parsed.loc[remain] = s_str.loc[remain].apply(lambda x: pd.to_datetime(x, errors="coerce"))
+
+        # 去除时区信息（保持本地墙上时间）
         try:
-            parsed = parsed.dt.tz_localize(None)
+            if hasattr(parsed.dt, "tz") and parsed.dt.tz is not None:
+                parsed = parsed.dt.tz_localize(None)
         except Exception:
-            pass
+            parsed = parsed.apply(
+                lambda x: x.tz_localize(None) if isinstance(x, pd.Timestamp) and x.tzinfo is not None else x
+            )
+            parsed = pd.to_datetime(parsed, errors="coerce")
         return parsed
 
     def _build_filename(
@@ -308,19 +357,11 @@ class FinancialDataStorage:
                 existing = pd.DataFrame()
 
         # 解析时间列，记录调试信息
-        existing_rows = len(existing)
-        new_rows = len(new_df)
-        exist_time_range = (None, None)
-        new_time_range = (None, None)
         if time_column in existing.columns:
             exist_parsed = self._parse_time_series(existing[time_column])
-            if not exist_parsed.dropna().empty:
-                exist_time_range = (exist_parsed.min(), exist_parsed.max())
             existing[time_column] = exist_parsed
         if time_column in new_df.columns:
             new_parsed = self._parse_time_series(new_df[time_column])
-            if not new_parsed.dropna().empty:
-                new_time_range = (new_parsed.min(), new_parsed.max())
             new_df = new_df.copy()
             new_df[time_column] = new_parsed
 
@@ -333,12 +374,6 @@ class FinancialDataStorage:
                 merged = merged.dropna(subset=[time_column])
             merged = merged.drop_duplicates(subset=[time_column], keep="last" if prefer_new else "first")
             merged = merged.sort_values(by=time_column)
-            # 再次记录合并后的时间范围
-            merged_time = merged[time_column]
-            merged_time_range = (None, None)
-            if not merged_time.dropna().empty:
-                merged_time_range = (merged_time.min(), merged_time.max())
-            print(f"[DEBUG merge] existing={existing_rows} {exist_time_range}, new={new_rows} {new_time_range}, merged={len(merged)} {merged_time_range}")
             # 将时间列标准化为无时区的 ISO 字符串
             try:
                 merged[time_column] = pd.to_datetime(merged[time_column], errors="coerce").dt.tz_localize(None)

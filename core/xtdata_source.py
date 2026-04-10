@@ -202,3 +202,37 @@ class XtdataSource(BaseMarketDataSource):
             )
         except Exception:
             return str(raw)
+
+
+@dataclass
+class MappedXtdataSource(BaseMarketDataSource):
+    """
+    带取数代码映射的 xtdata 数据源包装器。
+
+    用途：
+        - 上游实际取数代码可能是 `rb00.SF`；
+        - 但落盘对象应是 `Futures_data / rb / 主力连续`；
+        - 因此这里将“实际取数代码”和“存储 symbol”解耦。
+    """
+
+    inner: XtdataSource
+    fetch_symbol: str
+
+    def fetch(
+        self,
+        symbol: str,
+        cycle: str,
+        market: str,
+        specific: str,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """忽略入库层传入的存储 symbol，改用预绑定的 fetch_symbol 取数。"""
+        return self.inner.fetch(
+            symbol=self.fetch_symbol,
+            cycle=cycle,
+            market=market,
+            specific=specific,
+            start=start,
+            end=end,
+        )
