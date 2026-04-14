@@ -28,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 import pandas as pd
 
 from bridge_service.service_runtime import ServiceRuntime
+from bridge_service.service_tasks import ServiceTaskManager
 
 
 logger = logging.getLogger(__name__)
@@ -231,6 +232,7 @@ class BridgeServiceState:
     shutdown_reason: Optional[str] = None
     shutdown_callback: Optional[Callable[[], None]] = None
     probe_func: Callable[[str, str, str, str], dict[str, Any]] = field(default=probe_history)
+    task_manager: ServiceTaskManager = field(default_factory=ServiceTaskManager)
 
     def health_payload(self, deep: bool = False) -> dict[str, Any]:
         """生成 /health 返回内容。"""
@@ -297,6 +299,48 @@ class BridgeServiceState:
         if self.shutdown_callback is not None:
             self.shutdown_callback()
 
+    def submit_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """处理 /submit_task 请求。"""
+        task_type = str(payload.get("task_type") or "").strip()
+        task_payload = payload.get("payload") or {}
+        if not task_type:
+            raise ValueError("submit_task 缺少必要参数：task_type")
+        if not isinstance(task_payload, dict):
+            raise ValueError("submit_task.payload 必须为对象。")
+        task = self.task_manager.submit_task(task_type=task_type, payload=task_payload)
+        return {
+            "ok": True,
+            "status": "accepted",
+            "service": self.service_name,
+            "task": task.to_public_dict(),
+            "supported_task_types": self.task_manager.list_task_types(),
+        }
+
+    def get_task_payload(self, task_id: str) -> dict[str, Any]:
+        """处理 /task/{task_id} 请求。"""
+        task = self.task_manager.get_task(task_id)
+        if task is None:
+            return {
+                "ok": False,
+                "status": "task_not_found",
+                "message": f"未找到任务：{task_id}",
+            }
+        return {
+            "ok": True,
+            "status": "ok",
+            "task": task.to_public_dict(),
+        }
+
+    def list_recent_tasks_payload(self, limit: int = 20) -> dict[str, Any]:
+        """处理 /tasks/recent 请求。"""
+        return {
+            "ok": True,
+            "status": "ok",
+            "tasks": self.task_manager.list_recent_tasks(limit=limit),
+            "supported_task_types": self.task_manager.list_task_types(),
+            "supported_ingest_modes": self.task_manager.list_ingest_modes(),
+        }
+
 
 class BridgeHTTPServer(ThreadingHTTPServer):
     """带最小服务状态的 HTTPServer。"""
@@ -349,6 +393,22 @@ def make_handler(state: BridgeServiceState) -> type[BaseHTTPRequestHandler]:
                 self._send_json(200, state.status_detail_payload())
                 return
 
+            if parsed.path.startswith("/task/"):
+                task_id = parsed.path.removeprefix("/task/").strip()
+                payload = state.get_task_payload(task_id)
+                self._send_json(200 if payload.get("ok") else 404, payload)
+                return
+
+            if parsed.path == "/tasks/recent":
+                query = parse_qs(parsed.query)
+                limit_text = str(query.get("limit", ["20"])[0] or "20")
+                try:
+                    limit = max(1, int(limit_text))
+                except Exception:
+                    limit = 20
+                self._send_json(200, state.list_recent_tasks_payload(limit=limit))
+                return
+
             self._send_json(
                 404,
                 {"ok": False, "status": "not_found", "message": f"未找到接口：{parsed.path}"},
@@ -376,6 +436,18 @@ def make_handler(state: BridgeServiceState) -> type[BaseHTTPRequestHandler]:
                     )
                     return
                 self._send_json(200, result)
+                return
+
+            if parsed.path == "/submit_task":
+                try:
+                    result = state.submit_task(payload)
+                except Exception as exc:
+                    self._send_json(
+                        400,
+                        {"ok": False, "status": "submit_task_invalid", "message": str(exc)},
+                    )
+                    return
+                self._send_json(202, result)
                 return
 
             if parsed.path == "/shutdown":

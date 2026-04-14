@@ -96,6 +96,36 @@ class TestServiceApi(unittest.TestCase):
             self.assertFalse(payload["dependency"]["ok"])
             runtime.cleanup()
 
+    def test_submit_task_and_query_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = ServiceRuntime(base_dir=Path(tmpdir), port=0)
+            runtime.prepare()
+            state = BridgeServiceState(runtime=runtime)
+            with patch(
+                "bridge_service.service_tasks.run_profile",
+                return_value={"total": 1, "updated": 1, "failed_count": 0},
+            ):
+                submit = state.submit_task(
+                    {
+                        "task_type": "ingest_run",
+                        "payload": {"mode": "recent-backfill"},
+                    }
+                )
+                task_id = submit["task"]["task_id"]
+                for _ in range(50):
+                    payload = state.get_task_payload(task_id)
+                    if payload["task"]["status"] == "success":
+                        break
+                    time.sleep(0.05)
+
+            queried = state.get_task_payload(task_id)
+            self.assertTrue(queried["ok"])
+            self.assertEqual(queried["task"]["status"], "success")
+            recent = state.list_recent_tasks_payload(limit=5)
+            self.assertTrue(recent["ok"])
+            self.assertTrue(len(recent["tasks"]) >= 1)
+            runtime.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()
