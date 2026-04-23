@@ -1,0 +1,84 @@
+# -*- coding: utf-8 -*-
+"""
+实时行情控制面空白启动入口。
+
+Responsibilities:
+    - 复用现有 YAML 配置中的 Redis、日志、QMT 与推送 topic 参数。
+    - 清空初始订阅标的，使服务启动后只等待 Redis 控制面订阅命令。
+    - 强制开启 ControlPlane，避免启动后无法接收 subscribe/unsubscribe/status。
+
+Data Contract:
+    - 配置文件结构与 `scripts/run_with_config.py` 使用的 AppConfig 保持一致。
+    - 启动后不主动订阅任何 `(code, period)`，订阅来源必须是 Redis 控制通道。
+
+Internal Dependencies:
+    - core.config_loader: 加载 YAML 配置。
+    - scripts.run_with_config: 复用实时服务启动装配逻辑。
+
+External Systems:
+    - MiniQMT / xtdata: 真实行情连接。
+    - Redis: 控制命令、ACK 与行情推送。
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import Optional
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from core.config_loader import load_config
+from scripts.run_with_config import build_demo_app_config, run_from_config
+
+
+def build_control_config(config_path: Optional[str] = None):
+    """构造实时控制面空白启动配置。
+
+    Args:
+        config_path (Optional[str]): 可选 YAML 配置文件路径。未提供时优先使用
+            `config/run_config.yml`，不存在则使用 Demo 配置。
+
+    Returns:
+        AppConfig: 已清空初始订阅、开启控制面并关闭启动预热的配置对象。
+    """
+    cfg_path = Path(config_path) if config_path else BASE_DIR / "config/run_config.yml"
+    if cfg_path.exists():
+        cfg = load_config(str(cfg_path), allow_empty_subscription=True)
+        print(f"[CTRL] 加载配置：{cfg_path}")
+    else:
+        cfg = build_demo_app_config()
+        print("[CTRL] 未找到配置文件，使用 Demo 配置并切换为空白控制面模式。")
+
+    cfg.subscription.codes = []
+    cfg.subscription.preload_days = 0
+    cfg.control.enabled = True
+    return cfg
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    """启动实时行情控制面并进入阻塞运行。
+
+    Args:
+        argv (Optional[list[str]]): 命令行参数，测试时可显式传入。
+
+    Returns:
+        None
+    """
+    parser = argparse.ArgumentParser(description="QMTD 实时行情控制面空白启动入口")
+    parser.add_argument("--config", help="YAML 配置路径；默认使用 config/run_config.yml", required=False)
+    args = parser.parse_args(argv)
+
+    cfg = build_control_config(args.config)
+    print(
+        "[CTRL] 空白启动：initial_codes=0 "
+        f"periods={cfg.subscription.periods} ctrl={cfg.control.channel} ack={cfg.control.ack_prefix} "
+        f"topic={cfg.redis.topic}"
+    )
+    run_from_config(cfg)
+
+
+if __name__ == "__main__":
+    main()

@@ -9,6 +9,8 @@ Responsibilities:
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -95,6 +97,29 @@ class TestServiceApi(unittest.TestCase):
             self.assertEqual(payload["status"], "degraded")
             self.assertFalse(payload["dependency"]["ok"])
             runtime.cleanup()
+
+    def test_service_main_import_chain_ok(self) -> None:
+        """
+        验证 service_main.py 在子进程场景下可完成项目内导入链。
+
+        说明：
+            - 该测试不启动 HTTP 服务；
+            - 仅在子进程中 import service_main，确保 `core.ingest_runner` 不再导入失败。
+        """
+        command = [
+            sys.executable,
+            "-c",
+            "import service_main; print('OK')",
+        ]
+        proc = subprocess.run(
+            command,
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertIn("OK", proc.stdout)
 
     def test_submit_task_and_query_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

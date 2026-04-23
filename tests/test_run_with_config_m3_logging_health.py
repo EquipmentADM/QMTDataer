@@ -59,6 +59,11 @@ health:
         class FakePublisher:
             def __init__(self, **kw): pass
         class FakeRtCfg:
+            class MockConfig:
+                def __init__(self, **kw):
+                    for k, v in kw.items():
+                        setattr(self, k, v)
+
             def __init__(self, **kw): pass
         class FakeService:
             def __init__(self, cfg, publisher): pass
@@ -116,6 +121,11 @@ health:
         class FakePublisher:
             def __init__(self, **kw): pass
         class FakeRtCfg:
+            class MockConfig:
+                def __init__(self, **kw):
+                    for k, v in kw.items():
+                        setattr(self, k, v)
+
             def __init__(self, **kw): pass
         class FakeService:
             def __init__(self, cfg, publisher): pass

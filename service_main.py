@@ -16,6 +16,16 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# ---- 启动导入路径修正 ----
+# 说明：
+#     - bridge 模式由主控通过 subprocess 从外部环境拉起；
+#     - 某些启动场景下，Python 的 sys.path 解析可能先命中其他同名包（如 core）；
+#     - 因此在导入 bridge_service 前，先将当前项目根目录显式插入 sys.path 首位，
+#       避免 `core.ingest_runner` 等项目内模块被错误解析。
+ROOT_DIR = Path(__file__).resolve().parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from bridge_service.service_api import BridgeServiceState, create_http_server, shutdown_server_async
 from bridge_service.service_runtime import ServiceRuntime
 

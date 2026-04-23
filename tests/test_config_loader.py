@@ -96,6 +96,28 @@ subscription:
             load_config(path)
         os.remove(path)
 
+    def test_empty_codes_allowed_for_control_mode(self):
+        """测试内容：实时控制面允许空订阅配置
+        目的：验证空白启动入口可以加载没有初始 codes 的配置。
+        输入：codes: []，并显式允许空订阅。
+        预期输出：AppConfig.subscription.codes 为空列表。
+        """
+        y = """
+subscription:
+  codes: []
+  periods: [1m]
+  mode: close_only
+control:
+  enabled: true
+"""
+        path = self._write_yaml(y)
+        from core.config_loader import load_config
+        cfg = load_config(path, allow_empty_subscription=True)
+        self.assertEqual(cfg.subscription.codes, [])
+        self.assertEqual(cfg.subscription.periods, ["1m"])
+        self.assertTrue(cfg.control.enabled)
+        os.remove(path)
+
     def test_invalid_mode_raises(self):
         """测试内容：订阅模式非法
         目的：限定 mode 只能是 close_only 或 forming_and_close

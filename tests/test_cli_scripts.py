@@ -8,6 +8,8 @@
 import unittest
 from unittest import mock
 import sys
+import os
+import tempfile
 
 
 class TestCLIScripts(unittest.TestCase):
@@ -64,3 +66,42 @@ class TestCLIScripts(unittest.TestCase):
             self.assertEqual(mconn.call_count, 1)
             self.assertEqual(mpub.call_count, 1)
             self.assertEqual(mrun.call_count, 1)
+
+    def test_run_realtime_control_forces_blank_control_mode(self):
+        """测试内容：实时控制面入口强制空白启动
+        目的：验证入口会清空初始订阅、开启控制面并关闭启动预热。
+        输入：配置文件内包含初始 codes 且 control.enabled=false。
+        预期输出：传入 run_from_config 的配置已切换为空白控制面模式。
+        """
+        y = """
+qmt:
+  mode: none
+redis:
+  host: 127.0.0.1
+  port: 6379
+  topic: xt:topic:bar
+subscription:
+  codes: [510050.SH]
+  periods: [1m]
+  mode: close_only
+  preload_days: 3
+control:
+  enabled: false
+  channel: xt:ctrl:sub
+  ack_prefix: xt:ctrl:ack
+"""
+        fd, path = tempfile.mkstemp(suffix=".yml")
+        os.close(fd)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(y)
+
+        from scripts import run_realtime_control
+        with mock.patch.object(run_realtime_control, "run_from_config") as mrun:
+            run_realtime_control.main(["--config", path])
+
+        cfg = mrun.call_args.args[0]
+        self.assertEqual(cfg.subscription.codes, [])
+        self.assertEqual(cfg.subscription.preload_days, 0)
+        self.assertTrue(cfg.control.enabled)
+        self.assertEqual(cfg.control.channel, "xt:ctrl:sub")
+        os.remove(path)

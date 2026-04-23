@@ -187,11 +187,19 @@ def _as_list(obj: Any) -> List[str]:
 
 
 # ----------------- 主加载函数 -----------------
-def load_config(path: str) -> AppConfig:
-    """方法说明：从 YAML 加载配置
-    功能：读取 YAML，做基本校验与默认填充，返回 AppConfig。
-    上游：scripts/run_with_config.py；
-    下游：核心服务初始化。
+def load_config(path: str, allow_empty_subscription: bool = False) -> AppConfig:
+    """从 YAML 加载运行配置。
+
+    Args:
+        path (str): YAML 配置文件路径。
+        allow_empty_subscription (bool): 是否允许 `subscription.codes` 为空。
+
+    Returns:
+        AppConfig: 解析、校验并填充默认值后的配置对象。
+
+    Note:
+        默认保持原有严格校验，要求初始订阅标的非空。实时控制面空白启动入口会显式传入
+        `allow_empty_subscription=True`，用于只启动 ControlPlane 并等待 Redis 订阅命令。
     """
     with open(path, "r", encoding="utf-8") as f:
         raw: Dict[str, Any] = yaml.safe_load(f) or {}
@@ -243,7 +251,7 @@ def load_config(path: str) -> AppConfig:
     close_delay_ms = int(sub_raw.get("close_delay_ms", 100))
     preload_days = int(sub_raw.get("preload_days", 3))
 
-    if not codes:
+    if not codes and not allow_empty_subscription:
         raise ValueError("subscription.codes 不能为空")
     if not periods:
         raise ValueError("subscription.periods 不能为空")

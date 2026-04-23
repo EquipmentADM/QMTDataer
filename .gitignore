@@ -1,0 +1,19 @@
+﻿# Python cache
+__pycache__/
+*.py[cod]
+
+# Test cache
+.pytest_cache/
+
+# IDE artifacts
+.idea/
+
+# Runtime artifacts
+runtime/
+scripts/logs/
+scripts/quote_events.csv
+*probe_events.csv
+
+# Local backup / generated audit files
+*.bak
+docs/comment_audit_report.json

@@ -731,7 +731,6 @@ class RealtimeSubscriptionService:
             "openInterest": row.get("openInterest"),
             "settlementPrice": row.get("settlementPrice") or row.get("settelementPrice"),
             "source": src,
-            "recv_ts": datetime.now(CN_TZ).isoformat(),
         }
         return payload
 

@@ -54,6 +54,12 @@ logging:
         class FakePublisher:
             def __init__(self, **kw): TestRunWithConfig._pub_args = kw
         class FakeRtCfg:
+            class MockConfig:
+                def __init__(self, **kw):
+                    TestRunWithConfig._mock_cfg = kw
+                    for k, v in kw.items():
+                        setattr(self, k, v)
+
             def __init__(self, **kw): TestRunWithConfig._rt_cfg = kw
         class FakeService:
             def __init__(self, cfg, publisher):
