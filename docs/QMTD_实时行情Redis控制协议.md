@@ -122,6 +122,9 @@ ACK 通用字段：
 }
 ```
 
+这里的 `sub_id` 是 QMTD ControlPlane / Registry 生成并通过 subscribe ACK 返回的协议订阅 ID。
+它不是 xtdata 底层订阅 ID。
+
 ### 5.2 按 codes 与 periods 退订
 
 兼容方式：
@@ -163,6 +166,23 @@ ACK 通用字段：
 - 未提供 `sub_id`，且 `codes` 或 `periods` 为空。
 - QMTD 底层退订失败。
 
+### 5.5 退订内部实现说明
+
+当前退订链路如下：
+
+1. 策略端按协议 `sub_id` 发送 `unsubscribe`。
+2. ControlPlane 从 Registry 读取该 `sub_id` 对应的 `codes` 与 `periods`。
+3. RealtimeSubscriptionService 按 `(code, period)` 减少引用计数。
+4. 只有引用计数归零时，QMTD 才取消底层 xtdata 订阅。
+5. 当前 MiniQMT / xtdata 环境中，底层 `unsubscribe_quote()` 需要使用 `subscribe_quote()` 返回的内部订阅 ID。
+
+因此有两个不同的 ID：
+
+- 协议 `sub_id`：暴露给策略端 / BTLive 端，用于向 QMTD 退订。
+- xtdata 内部订阅 ID：QMTD 内部保存，用于真正调用 `xtdata.unsubscribe_quote()`。
+
+策略端不需要、也不应该感知 xtdata 内部订阅 ID。
+
 ## 6. status
 
 ### 6.1 请求
@@ -182,7 +202,7 @@ ACK 通用字段：
   "action": "status",
   "status": {
     "subs": [
-      {"code": "510050.SH", "period": "1m"}
+      {"code": "510050.SH", "period": "1m", "ref_count": 2}
     ],
     "last_published": {
       "510050.SH|1m": 1770000000.0
@@ -193,6 +213,14 @@ ACK 通用字段：
 ```
 
 当前 `subs` 字段包含注册表里的 `sub_id` 列表；`status.subs` 包含实时服务当前活跃行情流。
+`ref_count` 表示该 `(code, period)` 当前被多少次订阅引用。
+
+注意：
+
+- 判断当前 QMTD 是否仍在推某个底层行情流，应以 `status.status.subs` 为准。
+- 顶层 `subs` 来自 Registry，表示注册表中保存的协议 `sub_id` 列表。
+- Registry 可能存在历史遗留 `sub_id`，顶层 `subs` 不等价于当前活跃底层订阅。
+- 策略端退订后，建议再发送一次 `status`，确认目标 `(code, period)` 已从 `status.status.subs` 中消失。
 
 ### 6.3 后续增强方向
 
@@ -232,14 +260,14 @@ ACK 通用字段：
 - 会产生多个订阅记录。
 - 后续需要分别退订，或由后续引用计数机制统一处理。
 
-目标设计中，底层行情流应按 `(code, period)` 做引用计数。同一行情流被多次引用时，只应向 xtdata
+当前服务端底层行情流已按 `(code, period)` 做引用计数。同一行情流被多次引用时，只向 xtdata
 注册一次底层订阅。
 
 ### 7.2 unsubscribe
 
 推荐按 `sub_id` 退订，因为它能精确对应一次订阅请求。
 
-后续引用计数目标规则：
+当前引用计数规则：
 
 - 每次退订只减少对应 `sub_id` 展开的 `(code, period)` 引用。
 - 只有某个 `(code, period)` 的引用计数降为 `0` 时，才真正取消底层 xtdata 订阅。
@@ -296,3 +324,53 @@ QMTD 应尽量返回结构化 ACK，而不是让调用方只能依赖日志。
 - `scripts/send_control_cmd.py`
 
 后续建议新增更贴近策略端的示例客户端，把订阅、等待 ACK、退订封装为可复用函数。
+
+## 11. 真实联调记录
+
+最近一次真实联调已覆盖以下链路：
+
+```text
+QMTD 空白启动
+-> Redis 控制通道发送 subscribe
+-> 收到 subscribe ACK
+-> Redis 行情 topic 收到 1m close-only bar
+-> 自动发送 unsubscribe
+-> status.status.subs 返回空数组
+```
+
+测试环境：
+
+- MiniQMT：已启动并可通过 xtdata 获取实时数据。
+- Redis：`redis://127.0.0.1:6379/0`
+- QMTD 启动入口：`scripts/run_realtime_control.py`
+- 控制通道：`xt:ctrl:sub`
+- ACK 前缀：`xt:ctrl:ack`
+- 行情 topic：`xt:topic:bar`
+- 测试标的：`510050.SH`、`510900.SH`
+- 测试周期：`1m`
+
+收到的示例行情：
+
+```text
+[BAR] 510900.SH 1m 2026-04-23T14:50:00 close=1.082 is_closed=True
+[BAR] 510050.SH 1m 2026-04-23T14:50:00 close=3.002... is_closed=True
+```
+
+退订后 status 示例：
+
+```json
+{
+  "ok": true,
+  "action": "status",
+  "status": {
+    "subs": [],
+    "last_published": {
+      "510900.SH|1m": 1776927121.201879,
+      "510050.SH|1m": 1776927122.2272217
+    }
+  },
+  "subs": ["sub-历史遗留示例"]
+}
+```
+
+上例中 `status.subs=[]` 表示当前没有活跃底层行情流；顶层 `subs` 仅表示 Registry 中仍有历史记录。

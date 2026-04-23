@@ -10,6 +10,7 @@ __pycache__/
 
 # Runtime artifacts
 runtime/
+logs/
 scripts/logs/
 scripts/quote_events.csv
 *probe_events.csv

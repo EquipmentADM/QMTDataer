@@ -39,13 +39,20 @@ def build_control_config(config_path: Optional[str] = None):
 
     Args:
         config_path (Optional[str]): 可选 YAML 配置文件路径。未提供时优先使用
-            `config/run_config.yml`，不存在则使用 Demo 配置。
+            `config/realtime_control.yml`，其次回退到 `config/run_config.yml`，再不存在则使用 Demo 配置。
 
     Returns:
         AppConfig: 已清空初始订阅、开启控制面并关闭启动预热的配置对象。
     """
-    cfg_path = Path(config_path) if config_path else BASE_DIR / "config/run_config.yml"
-    if cfg_path.exists():
+    cfg_path = Path(config_path) if config_path else None
+    if cfg_path is None:
+        default_candidates = [
+            BASE_DIR / "config/realtime_control.yml",
+            BASE_DIR / "config/run_config.yml",
+        ]
+        cfg_path = next((item for item in default_candidates if item.exists()), None)
+
+    if cfg_path and cfg_path.exists():
         cfg = load_config(str(cfg_path), allow_empty_subscription=True)
         print(f"[CTRL] 加载配置：{cfg_path}")
     else:
@@ -68,7 +75,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         None
     """
     parser = argparse.ArgumentParser(description="QMTD 实时行情控制面空白启动入口")
-    parser.add_argument("--config", help="YAML 配置路径；默认使用 config/run_config.yml", required=False)
+    parser.add_argument(
+        "--config",
+        help="YAML 配置路径；默认优先使用 config/realtime_control.yml",
+        required=False,
+    )
     args = parser.parse_args(argv)
 
     cfg = build_control_config(args.config)

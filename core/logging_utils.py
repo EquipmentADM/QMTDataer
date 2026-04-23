@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import logging.handlers
+import os
 from typing import Optional
 
 
@@ -60,6 +61,9 @@ def setup_logging(level: str = "INFO", to_file: Optional[str] = None,
 
     # 文件输出（可选）
     if to_file:
+        log_dir = os.path.dirname(os.path.abspath(to_file))
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
         if rotate_enabled:
             fh = logging.handlers.RotatingFileHandler(
                 to_file, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"

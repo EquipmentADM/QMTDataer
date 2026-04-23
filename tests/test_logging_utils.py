@@ -24,6 +24,7 @@ class TestLoggingUtils(unittest.TestCase):
         root = logging.getLogger()
         for h in list(root.handlers):
             root.removeHandler(h)
+            h.close()
         root.setLevel(logging.WARNING)
 
     def test_console_text_logging(self):
@@ -63,3 +64,20 @@ class TestLoggingUtils(unittest.TestCase):
                     os.remove(p)
                 except OSError:
                     pass
+
+    def test_file_parent_dir_auto_created(self):
+        """测试内容：文件日志目录自动创建
+        目的：验证配置中的日志目录不存在时，setup_logging 不会导致服务启动失败。
+        输入：临时目录下的二级不存在目录。
+        预期输出：日志文件父目录和日志文件均被创建。
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "nested", "realtime_bridge.log")
+            setup_logging(level="INFO", to_file=log_path, rotate_enabled=True)
+            logging.getLogger("T").info("hello")
+            self.assertTrue(os.path.isdir(os.path.dirname(log_path)))
+            self.assertTrue(os.path.exists(log_path))
+            root = logging.getLogger()
+            for h in list(root.handlers):
+                root.removeHandler(h)
+                h.close()

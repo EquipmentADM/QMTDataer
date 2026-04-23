@@ -50,3 +50,24 @@ class TestRegistryIntegration(unittest.TestCase):
         self.assertNotIn(sub_id, self.r.smembers(self.prefix + ":subs"))
         self.assertFalse(self.r.exists(self.prefix + f":sub:{sub_id}"))
         self.assertNotIn(sub_id, self.r.smembers(self.prefix + ":strategy:stratA:subs"))
+
+    def test_delete_by_strategy_and_clear_all(self):
+        spec_a = SubscriptionSpec(strategy_id="stratA", codes=["518880.SH"], periods=["1m"],
+                                  mode="close_only", preload_days=0, topic="xt:topic:test",
+                                  created_at=int(time.time()))
+        spec_b = SubscriptionSpec(strategy_id="stratB", codes=["510050.SH"], periods=["1m"],
+                                  mode="close_only", preload_days=0, topic="xt:topic:test",
+                                  created_at=int(time.time()))
+        sub_a = self.registry.gen_sub_id()
+        sub_b = self.registry.gen_sub_id()
+        self.registry.save(sub_a, spec_a)
+        self.registry.save(sub_b, spec_b)
+
+        deleted_a = self.registry.delete_by_strategy("stratA")
+        self.assertEqual(deleted_a, [sub_a])
+        self.assertIsNone(self.registry.load(sub_a))
+        self.assertIsNotNone(self.registry.load(sub_b))
+
+        deleted_all = self.registry.clear_all()
+        self.assertEqual(deleted_all, [sub_b])
+        self.assertEqual(self.registry.list_all(), [])

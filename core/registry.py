@@ -109,3 +109,28 @@ class Registry:
 
     def list_by_strategy(self, strategy_id: str) -> List[str]:
         return sorted(self._cli.smembers(self._k_strategy_subs(strategy_id)))
+
+    def delete_by_strategy(self, strategy_id: str) -> List[str]:
+        """按策略 ID 删除其全部订阅记录。
+
+        Args:
+            strategy_id (str): 策略标识。
+
+        Returns:
+            List[str]: 实际删除的 `sub_id` 列表。
+        """
+        sub_ids = self.list_by_strategy(strategy_id)
+        for sub_id in sub_ids:
+            self.delete(sub_id)
+        return sub_ids
+
+    def clear_all(self) -> List[str]:
+        """清空当前 registry_prefix 下的全部订阅记录。
+
+        Returns:
+            List[str]: 实际删除的 `sub_id` 列表。
+        """
+        sub_ids = self.list_all()
+        for sub_id in sub_ids:
+            self.delete(sub_id)
+        return sub_ids

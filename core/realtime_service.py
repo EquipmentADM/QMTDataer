@@ -32,7 +32,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Optional
 from collections import deque
-from datetime import datetime, timedelta, timezone, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -363,8 +363,10 @@ class RealtimeSubscriptionService:
         # 并发保护
         self._lock = threading.RLock()
 
-        # 当前订阅集（(code, period)）
+        # 当前活跃行情流集合，作为对外状态与 MockFeeder 的兼容视图。
         self._subs: set[Tuple[str, str]] = set()
+        self._sub_ref_counts: Dict[Tuple[str, str], int] = {}
+        self._quote_sub_ids: Dict[Tuple[str, str], Any] = {}
 
         # 去重：LRU + 集合
         self._dedup_set: set[Tuple[Any, ...]] = set()
@@ -418,13 +420,16 @@ class RealtimeSubscriptionService:
     # 动态增删订阅
     # ----------------------------------------------------------------------
     def add_subscription(self, codes: List[str], periods: List[str], preload_days: Optional[int] = None) -> None:
-        """方法说明：新增订阅
-        功能：
-            - 可选地先进行历史预热（补齐若干天）；
-            - 为每个 (code, period) 调用 _register_one 完成订阅注册；
-        :param codes: 标的列表
-        :param periods: 周期列表（'1m' | '1h' | '1d' 等）
-        :param preload_days: 覆盖 cfg.preload_days；为 0 或 None 则不预热
+        """新增订阅引用，并在首次引用时注册底层行情。
+
+        Args:
+            codes (List[str]): 标的列表。
+            periods (List[str]): 周期列表，例如 `1m`、`1h`、`1d`。
+            preload_days (Optional[int]): 覆盖配置中的预热天数，`0` 表示不预热。
+
+        Note:
+            引用计数按 `(code, period)` 统计。重复订阅同一行情流只增加计数，不重复调用
+            `xtdata.subscribe_quote`。
         """
         days = int(preload_days if preload_days is not None else self.cfg.preload_days or 0)
         if not self.cfg.mock.enabled and days > 0:
@@ -433,43 +438,94 @@ class RealtimeSubscriptionService:
         with self._lock:
             for c in codes:
                 for p in periods:
-                    if (c, p) in self._subs:
+                    key = (c, p)
+                    current_ref = self._sub_ref_counts.get(key, 0)
+                    if current_ref > 0:
+                        self._sub_ref_counts[key] = current_ref + 1
+                        self._log.info("[RT] 订阅引用增加: %s %s ref=%d", c, p, current_ref + 1)
                         continue
                     if not self.cfg.mock.enabled:
-                        self._register_one(c, p)
-                    self._subs.add((c, p))
+                        self._quote_sub_ids[key] = self._register_one(c, p)
+                    self._subs.add(key)
+                    self._sub_ref_counts[key] = 1
                     if self.cfg.mock.enabled:
-                        self._log.info("[RT] Mock 订阅已登记: %s %s", c, p)
+                        self._log.info("[RT] Mock 订阅已登记: %s %s ref=1", c, p)
                     else:
-                        self._log.info("[RT] 订阅已注册: %s %s", c, p)
+                        self._log.info("[RT] 订阅已注册: %s %s ref=1", c, p)
 
     def remove_subscription(self, codes: List[str], periods: List[str]) -> None:
-        """方法说明：移除订阅
-        功能：调用 xtdata.unsubscribe_quote，并更新内部订阅集
+        """移除订阅引用，并在引用归零时取消底层行情。
+
+        Args:
+            codes (List[str]): 标的列表。
+            periods (List[str]): 周期列表。
+
+        Returns:
+            None
+
+        Note:
+            如果同一 `(code, period)` 仍被其他策略引用，只减少计数，不调用底层退订。
         """
         with self._lock:
             for c in codes:
                 for p in periods:
-                    if (c, p) not in self._subs:
+                    key = (c, p)
+                    current_ref = self._sub_ref_counts.get(key, 0)
+                    if current_ref <= 0:
+                        continue
+                    if current_ref > 1:
+                        self._sub_ref_counts[key] = current_ref - 1
+                        self._log.info("[RT] 订阅引用减少: %s %s ref=%d", c, p, current_ref - 1)
                         continue
                     if not self.cfg.mock.enabled:
-                        try:
-                            xtdata.unsubscribe_quote(stock_code=c, period=p)
-                        except TypeError:
-                            try:
-                                xtdata.unsubscribe_quote(c)
-                            except Exception as e:
-                                self._log.warning("[RT] unsubscribe failed: %s %s err=%s", c, p, e)
-                                continue
-                        except Exception as e:
-                            self._log.warning("[RT] unsubscribe failed: %s %s err=%s", c, p, e)
+                        ok = self._unsubscribe_one(c, p, self._quote_sub_ids.get(key))
+                        if not ok:
                             continue
-                    self._subs.discard((c, p))
-                    self._bar_states.pop((c, p), None)
+                    self._quote_sub_ids.pop(key, None)
+                    self._sub_ref_counts.pop(key, None)
+                    self._subs.discard(key)
+                    self._bar_states.pop(key, None)
                     if self.cfg.mock.enabled:
                         self._log.info("[RT] Mock 订阅已移除: %s %s", c, p)
                     else:
                         self._log.info("[RT] 订阅已移除: %s %s", c, p)
+
+    def _unsubscribe_one(self, code: str, period: str, sub_id: Any = None) -> bool:
+        """取消单个底层行情订阅。
+
+        Args:
+            code (str): 标的代码。
+            period (str): 周期。
+            sub_id (Any): `xtdata.subscribe_quote` 返回的订阅 ID。
+
+        Returns:
+            bool: 底层退订是否成功。
+
+        Note:
+            当前 MiniQMT 环境只接受订阅 ID。保留旧签名回退，兼容早期环境或测试替身。
+        """
+        if sub_id is not None:
+            try:
+                xtdata.unsubscribe_quote(sub_id)
+                return True
+            except Exception as e:
+                self._log.warning("[RT] unsubscribe by sub_id failed: %s %s sub_id=%s err=%s",
+                                  code, period, sub_id, e)
+                return False
+
+        try:
+            xtdata.unsubscribe_quote(stock_code=code, period=period)
+            return True
+        except TypeError:
+            try:
+                xtdata.unsubscribe_quote(code)
+                return True
+            except Exception as e:
+                self._log.warning("[RT] unsubscribe failed: %s %s err=%s", code, period, e)
+                return False
+        except Exception as e:
+            self._log.warning("[RT] unsubscribe failed: %s %s err=%s", code, period, e)
+            return False
 
     def _list_subscriptions(self) -> List[Tuple[str, str]]:
         with self._lock:
@@ -523,7 +579,7 @@ class RealtimeSubscriptionService:
         except Exception:
             return None
 
-    def _register_one(self, code: str, period: str) -> None:
+    def _register_one(self, code: str, period: str) -> Any:
         """方法说明：注册单标的/单周期订阅（官方签名回调）
         功能：
             - 向 xtdata.subscribe_quote 发起订阅（使用关键字参数）；
@@ -538,7 +594,7 @@ class RealtimeSubscriptionService:
                 self._log.exception("[RT] 回调处理异常 period=%s", period)
 
         # 官方建议：订阅实时部分时 count=0；历史由预热负责
-        xtdata.subscribe_quote(
+        return xtdata.subscribe_quote(
             stock_code=code,
             period=period,
             start_time="",
@@ -760,11 +816,15 @@ class RealtimeSubscriptionService:
     def status(self) -> Dict[str, Any]:
         """方法说明：返回服务状态
         内容：
-            - subs：当前订阅数组 [{'code':..., 'period':...}, ...]
+            - subs：当前订阅数组 [{'code':..., 'period':..., 'ref_count':...}, ...]
             - last_published：最近一次发布时间（epoch 秒）按 (code, period) 组织
         """
         with self._lock:
-            subs = sorted([{"code": c, "period": p} for (c, p) in self._subs],
+            subs = sorted([{
+                "code": c,
+                "period": p,
+                "ref_count": int(self._sub_ref_counts.get((c, p), 0)),
+            } for (c, p) in self._subs],
                           key=lambda x: (x["code"], x["period"]))
             last_pub = {f"{c}|{p}": ts for (c, p), ts in self._last_pub_ts.items()}
         return {"subs": subs, "last_published": last_pub}

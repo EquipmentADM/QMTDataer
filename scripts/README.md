@@ -15,6 +15,7 @@
 - `run_realtime_control.py`
   - 用途：实时行情控制面空白启动入口。
   - 场景：不预设初始订阅，启动后等待 Redis 控制通道的 `subscribe/unsubscribe/status`。
+  - 默认：优先读取 `config/realtime_control.yml`。
 
 - `run_realtime_bridge.py`
   - 用途：早期参数化实时桥入口（兼容保留）。
@@ -73,6 +74,10 @@ python -m scripts.xtdata_ingest recent-backfill --lookback 3
 
 - `send_control_cmd.py`
   - 用途：向控制面发送 `subscribe/unsubscribe/status` 命令。
+
+- `cleanup_realtime_registry.py`
+  - 用途：清理 Redis Registry 中残留的实时订阅 `sub_id` 记录。
+  - 场景：诊断时发现顶层 `subs` 有历史遗留记录，可先 dry-run 预览，再按策略或全量清理。
 
 - `simple_bar_listener.py`
   - 用途：监听 Redis topic，查看实时推送。

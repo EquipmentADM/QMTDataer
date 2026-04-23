@@ -154,17 +154,21 @@ QMTD 内部目前应视为两个业务面：
 - 不承担 QMTD 启动职责。
 - 不与 HTTP bridge 发生关系。
 
-### 4.3 多策略引用计数尚不完善
+### 4.3 多策略引用计数已按行情流口径补齐
 
-当前 `RealtimeSubscriptionService` 内部使用 `_subs: set[(code, period)]` 保存活跃订阅。
+当前 `RealtimeSubscriptionService` 内部同时维护：
 
-这意味着：
+- `_subs: set[(code, period)]`：活跃行情流集合，用于兼容状态展示与 MockFeeder。
+- `_sub_ref_counts: dict[(code, period), int]`：行情流引用计数。
 
-- 多个策略订阅同一个 `(code, period)` 时，服务端只会订阅一次，这是合理的。
-- 但任意一个策略退订同一个 `(code, period)` 时，当前服务可能直接取消底层订阅。
-- 这会影响仍然依赖该行情的其他策略。
+当前行为：
 
-因此目前不能认为多策略订阅引用计数已经完整。
+- 多个策略订阅同一个 `(code, period)` 时，底层 xtdata 只订阅一次。
+- 任意一个策略退订同一个 `(code, period)` 时，只减少引用计数。
+- 只有引用计数归零时，才调用底层 xtdata 退订并清理 bar 状态。
+
+该实现以简化为主，尚未在服务层保存 `sub_id -> stream_key` 的细粒度反查关系；订阅归属仍主要由
+`Registry` 记录。
 
 ### 4.4 空白启动入口已补充
 
@@ -328,7 +332,6 @@ scripts/run_realtime_control.py
 
 ### 9.1 第一优先级
 
-- 实现服务层按 `(code, period)` 的引用计数。
 - 将 `tests/flow_demo_subscribe_and_listen.py` 整理为策略端 ACK 示例或新增 `examples` 示例。
 
 ### 9.2 第二优先级

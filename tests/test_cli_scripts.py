@@ -105,3 +105,28 @@ control:
         self.assertTrue(cfg.control.enabled)
         self.assertEqual(cfg.control.channel, "xt:ctrl:sub")
         os.remove(path)
+
+    def test_run_realtime_control_prefers_control_config(self):
+        """测试内容：实时控制面入口默认优先读取 realtime_control.yml
+        目的：避免空白启动继续依赖 run_config.yml。
+        输入：不传 --config，模拟 control 配置存在。
+        预期输出：load_config 首次命中 config/realtime_control.yml。
+        """
+        from scripts import run_realtime_control
+
+        fake_cfg = mock.Mock()
+        fake_cfg.subscription.codes = []
+        fake_cfg.subscription.preload_days = 0
+        fake_cfg.subscription.periods = ["1m"]
+        fake_cfg.control.enabled = True
+        fake_cfg.control.channel = "xt:ctrl:sub"
+        fake_cfg.control.ack_prefix = "xt:ctrl:ack"
+        fake_cfg.redis.topic = "xt:topic:bar"
+
+        with mock.patch.object(run_realtime_control.Path, "exists", return_value=True), \
+             mock.patch.object(run_realtime_control, "load_config", return_value=fake_cfg) as mocked_load, \
+             mock.patch.object(run_realtime_control, "run_from_config"):
+            run_realtime_control.main([])
+
+        loaded_path = mocked_load.call_args.args[0].replace("\\", "/")
+        self.assertTrue(loaded_path.endswith("config/realtime_control.yml"))

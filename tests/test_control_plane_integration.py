@@ -76,7 +76,11 @@ class TestControlPlaneIntegration(unittest.TestCase):
         self.registry = Registry(p["host"], p["port"], p["password"], p["db"], prefix=self.reg_prefix)
 
         for _ in range(60):  # wait up to 3 seconds
-            if getattr(self.cp, "_pubsub", None) is not None:
+            if getattr(self.cp, "_pubsub", None) is None:
+                time.sleep(0.05)
+                continue
+            subscribers = self.cli.pubsub_numsub(self.channel)
+            if subscribers and int(subscribers[0][1]) > 0:
                 break
             time.sleep(0.05)
         else:
