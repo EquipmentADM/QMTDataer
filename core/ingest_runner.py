@@ -19,7 +19,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from core.ingestor import MarketDataIngestor
-from core.storage_simple import FinancialDataStorage
+from core.storage_backend import FinancialDataStorage, get_storage_backend_name
 from core.xtdata_futures import is_xt_futures_code, parse_xt_futures_code
 from core.xtdata_source import MappedXtdataSource, XtdataSource
 
@@ -434,6 +434,10 @@ def run_ingest(profile: IngestProfile) -> dict[str, Any]:
     )
 
     storage = FinancialDataStorage(root_dir=profile.root)
+    storage_backend = get_storage_backend_name()
+    storage_runtime = {}
+    if hasattr(storage, "check_runtime"):
+        storage_runtime = storage.check_runtime()
     ingestor = MarketDataIngestor(storage)
 
     total_tasks = len(targets) * len(profile.cycles)
@@ -445,8 +449,13 @@ def run_ingest(profile: IngestProfile) -> dict[str, Any]:
 
     print(
         f"[入库总览] 模式={profile.name} 标的={len(targets)} 周期={len(profile.cycles)} "
-        f"总任务={total_tasks} root={profile.root}"
+        f"总任务={total_tasks} root={profile.root} storage_backend={storage_backend}"
     )
+    if storage_runtime:
+        print(
+            f"[存储后端] backend={storage_runtime.get('backend')} "
+            f"fd_src={storage_runtime.get('fd_src')} fd_root={storage_runtime.get('fd_root')}"
+        )
     print(
         f"[入库参数] start={profile.start} end={end_use} skip_download={profile.skip_download} "
         f"auto_start={profile.auto_start} lookback={profile.lookback} merge={profile.merge}"
@@ -555,6 +564,8 @@ def run_ingest(profile: IngestProfile) -> dict[str, Any]:
         "not_updated": not_updated_tasks,
         "failed_count": failed_tasks,
         "elapsed_sec": elapsed,
+        "storage_backend": storage_backend,
+        "storage_runtime": storage_runtime,
     }
     if failed_msgs:
         raise RuntimeError(f"入库任务存在失败项: {failed_msgs}")

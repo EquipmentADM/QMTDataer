@@ -17,7 +17,7 @@ from typing import Callable, Optional
 
 import pandas as pd
 
-from core.storage_simple import FinancialDataStorage
+from core.storage_backend import FinancialDataStorage
 from core.xtdata_source import BaseMarketDataSource
 
 

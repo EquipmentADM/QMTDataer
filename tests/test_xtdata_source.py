@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 
 from core.xtdata_source import XtdataSource
 from core.ingestor import MarketDataIngestor
-from core.storage_simple import FinancialDataStorage
+from core.storage_backend import FinancialDataStorage
 import unittest
 
 

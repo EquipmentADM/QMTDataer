@@ -18,7 +18,7 @@ from core.ingest_runner import (
     build_profile,
 )
 from core.ingestor import MarketDataIngestor
-from core.storage_simple import FinancialDataStorage
+from core.storage_backend import FinancialDataStorage
 from core.xtdata_futures import build_xt_futures_ingest_params, parse_xt_futures_code
 from core.xtdata_source import MappedXtdataSource, XtdataSource
 
