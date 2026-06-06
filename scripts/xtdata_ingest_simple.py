@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 
 from core.ingestor import MarketDataIngestor
-from core.storage_backend import FinancialDataStorage
+from core.storage_simple import FinancialDataStorage
 from core.xtdata_source import XtdataSource
 
 
