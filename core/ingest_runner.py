@@ -19,6 +19,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from core.ingestor import MarketDataIngestor
+from core.storage_backend import build_storage_backend, resolve_storage_backend_config
 from core.storage_simple import FinancialDataStorage
 from core.xtdata_futures import is_xt_futures_code, parse_xt_futures_code
 from core.xtdata_source import MappedXtdataSource, XtdataSource
@@ -179,6 +180,8 @@ class IngestProfile:
     auto_start: bool = False
     lookback: int = 2
     merge: bool = True
+    storage_backend: str = ""
+    fd_repo: str = ""
 
 
 def _default_profiles() -> dict[str, IngestProfile]:
@@ -326,16 +329,17 @@ def _format_ts(ts: Optional[pd.Timestamp]) -> str:
 
 
 def _build_file_path(
-    storage: FinancialDataStorage,
+    storage: Any,
     target: IngestTarget,
     cycle: str,
     file_type: str = "csv",
     root: str = DEFAULT_ROOT,
 ) -> Path:
     """构造目标文件路径。"""
-    cycle_dir = storage._cycle_dir_map.get(cycle, cycle)
+    _ = root
+    target_dir = storage._build_target_dir(target.market, target.storage_symbol, cycle, target.specific)
     filename = storage._build_filename(target.market, target.storage_symbol, cycle, target.specific, file_type)
-    return Path(root) / target.market / target.storage_symbol / cycle_dir / target.specific / filename
+    return Path(target_dir) / filename
 
 
 def _read_existing_summary(file_path: Path) -> dict[str, Any]:
@@ -433,7 +437,12 @@ def run_ingest(profile: IngestProfile) -> dict[str, Any]:
         end=end_use,
     )
 
-    storage = FinancialDataStorage(root_dir=profile.root)
+    storage_config = resolve_storage_backend_config(
+        root=profile.root,
+        backend=profile.storage_backend or None,
+        fd_repo=profile.fd_repo or None,
+    )
+    storage = build_storage_backend(storage_config)
     ingestor = MarketDataIngestor(storage)
 
     total_tasks = len(targets) * len(profile.cycles)
@@ -445,7 +454,7 @@ def run_ingest(profile: IngestProfile) -> dict[str, Any]:
 
     print(
         f"[入库总览] 模式={profile.name} 标的={len(targets)} 周期={len(profile.cycles)} "
-        f"总任务={total_tasks} root={profile.root}"
+        f"总任务={total_tasks} backend={storage_config.backend} root={storage_config.root}"
     )
     print(
         f"[入库参数] start={profile.start} end={end_use} skip_download={profile.skip_download} "
@@ -457,7 +466,7 @@ def run_ingest(profile: IngestProfile) -> dict[str, Any]:
         base_source = XtdataSource(xtdata=xtdata_mod, download=not profile.skip_download)
         for target in targets:
             seq += 1
-            file_path = _build_file_path(storage, target, cycle, file_type="csv", root=profile.root)
+            file_path = _build_file_path(storage, target, cycle, file_type="csv", root=storage_config.root)
             existing = _read_existing_summary(file_path)
             start_use = _calc_start_use(profile, cycle, existing["time_max"])
             source = MappedXtdataSource(inner=base_source, fetch_symbol=target.fetch_symbol)
@@ -555,6 +564,9 @@ def run_ingest(profile: IngestProfile) -> dict[str, Any]:
         "not_updated": not_updated_tasks,
         "failed_count": failed_tasks,
         "elapsed_sec": elapsed,
+        "storage_backend": storage_config.backend,
+        "root": storage_config.root,
+        "fd_repo": storage_config.fd_repo,
     }
     if failed_msgs:
         raise RuntimeError(f"入库任务存在失败项: {failed_msgs}")

@@ -79,17 +79,38 @@ class XtdataSource(BaseMarketDataSource):
         返回：
             DataFrame，包含 time/open/high/low/close/volume/amount 等列，time 为 ISO8601(+08:00)
         """
+        xt_period = self._to_xtdata_period(cycle)
         if self.download:
-            self._download(symbol, cycle, start or "", end or "")
+            self._download(symbol, xt_period, start or "", end or "")
 
-        data_dict = self._get_market_data(symbol, cycle, start or "", end or "")
+        data_dict = self._get_market_data(symbol, xt_period, start or "", end or "")
         if not data_dict:
-            raise ValueError(f"xtdata 返回为空：{symbol}-{cycle}-{start}-{end}")
+            raise ValueError(f"xtdata 返回为空：{symbol}-{xt_period}-{start}-{end}")
 
         df = self._normalize(data_dict, symbol)
         if df.empty:
-            raise ValueError(f"xtdata 返回空 DataFrame：{symbol}-{cycle}-{start}-{end}")
+            raise ValueError(f"xtdata 返回空 DataFrame：{symbol}-{xt_period}-{start}-{end}")
         return df
+
+    @staticmethod
+    def _to_xtdata_period(cycle: str) -> str:
+        """
+        将 FD 标准周期转换为 xtdata 更稳定的周期写法。
+
+        Args:
+            cycle (str): 入库层周期，可能是 1m 或 FD 标准 1min。
+
+        Returns:
+            str: xtdata 取数周期。
+        """
+
+        mapping = {
+            "1min": "1m",
+            "5min": "5m",
+            "15min": "15m",
+            "30min": "30m",
+        }
+        return mapping.get(str(cycle), str(cycle))
 
     def _download(self, symbol: str, period: str, start: str, end: str) -> None:
         """调用 xtdata.download_history_data 做本地补齐"""

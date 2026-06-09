@@ -13,11 +13,10 @@ Data Contract:
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 
-from core.storage_simple import FinancialDataStorage
 from core.xtdata_source import BaseMarketDataSource
 
 
@@ -26,7 +25,7 @@ class MarketDataIngestor:
     行情入库协调器：负责“取数 -> 标准化 -> 校验 -> 落盘”全流程。
     """
 
-    def __init__(self, storage: FinancialDataStorage) -> None:
+    def __init__(self, storage: Any) -> None:
         self.storage = storage
 
     def ingest_symbol(

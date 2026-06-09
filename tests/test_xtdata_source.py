@@ -18,11 +18,14 @@ import unittest
 
 def _fake_xtdata():
     """构造一个简易 xtdata 替身，模拟 download 与 get 返回结构"""
+    calls = []
 
     def download_history_data(stock_code, period, start_time, end_time, incrementally=True):
+        calls.append(("download", period))
         return True
 
     def get_market_data_ex(**kwargs):
+        calls.append(("get", kwargs["period"]))
         # 构造 {field: DataFrame} 结构，time 为两条记录
         import pandas as pd
         idx = pd.Index(kwargs["stock_list"], name="code")
@@ -50,6 +53,7 @@ def _fake_xtdata():
         download_history_data=download_history_data,
         get_market_data_ex=get_market_data_ex,
         get_market_data=get_market_data,
+        calls=calls,
     )
 
 
@@ -76,6 +80,15 @@ class TestXtdataSource(unittest.TestCase):
             self.assertTrue(Path(out_path).exists())
             saved = pd.read_csv(out_path)
             self.assertFalse(saved.empty)
+
+    def test_fd_cycle_converts_to_xtdata_period(self):
+        """校验 FD 标准 1min 周期会转成 xtdata 更稳的 1m。"""
+        fake_xt = _fake_xtdata()
+        source = XtdataSource(xtdata=fake_xt, download=True)
+        source.fetch(symbol="MOCK.SH", cycle="1min", market="SS_stock_data", specific="original")
+
+        self.assertIn(("download", "1m"), fake_xt.calls)
+        self.assertIn(("get", "1m"), fake_xt.calls)
 
 
 if __name__ == "__main__":
