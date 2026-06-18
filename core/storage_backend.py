@@ -52,7 +52,8 @@ def resolve_storage_backend_config(
         StorageBackendConfig: 标准化后的后端配置。
     """
 
-    backend_use = (backend or os.environ.get("QMTD_STORAGE_BACKEND") or "legacy").strip().lower()
+    # 默认使用新 FD backend；如需回滚，可显式设置 QMTD_STORAGE_BACKEND=legacy。
+    backend_use = (backend or os.environ.get("QMTD_STORAGE_BACKEND") or "fd").strip().lower()
     if backend_use not in {"legacy", "fd"}:
         raise ValueError(f"未知 storage backend: {backend_use}，可选 legacy/fd")
 

@@ -57,6 +57,25 @@ class TestIngestRunner(unittest.TestCase):
         self.assertEqual(profile.lookback, 9)
         self.assertFalse(profile.merge)
 
+    def test_fd_daily_end_uses_next_day_at_request_layer(self):
+        """
+        测试内容：fd backend 的日线显式 end 在 QMTD 请求层做 end+1。
+
+        目的：兼容业务侧“包含结束日”的使用习惯，同时保持 FD core 半开区间契约。
+        """
+        self.assertEqual(
+            ingest_runner._resolve_cycle_end_time("20260610", "1d", "fd"),
+            "20260611",
+        )
+        self.assertEqual(
+            ingest_runner._resolve_cycle_end_time("20260610", "1m", "fd"),
+            "20260610",
+        )
+        self.assertEqual(
+            ingest_runner._resolve_cycle_end_time("20260610", "1d", "legacy"),
+            "20260610",
+        )
+
     def test_run_profile_delegate(self):
         """
         校验 run_profile 会调用 run_ingest，且传入构建后的 profile。

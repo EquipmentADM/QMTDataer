@@ -2,12 +2,10 @@
 """
 storage backend 构造逻辑测试。
 
-Responsibilities:
-    - 验证 legacy/fd backend 的配置解析。
-    - 验证环境变量可控制 fd backend 与 FD_DATA_ROOT。
-
-External Systems:
-    - 不写真实数据库，不连接 miniQMT 或 Redis。
+职责：
+    - 验证默认 backend 已切换为 fd；
+    - 验证 QMTD_STORAGE_BACKEND=legacy 回滚入口；
+    - 验证 fd backend 可读取 FD_REPO 与 FD_DATA_ROOT。
 """
 from __future__ import annotations
 
@@ -19,19 +17,27 @@ from core.storage_backend import resolve_storage_backend_config
 
 
 class TestStorageBackend(unittest.TestCase):
-    """
-    存储后端配置解析测试。
-    """
+    """存储后端配置解析测试。"""
 
-    def test_default_backend_is_legacy(self) -> None:
+    def test_default_backend_is_fd(self) -> None:
         """
-        默认后端应保持 legacy，确保可回滚。
+        测试内容：未设置环境变量时默认使用 fd backend。
 
-        Returns:
-            None: 通过断言验证行为。
+        目的：验证生产默认入库链路已切到新 FD。
         """
-
         with mock.patch.dict(os.environ, {}, clear=True):
+            config = resolve_storage_backend_config(root="D:/db")
+
+        self.assertEqual(config.backend, "fd")
+        self.assertEqual(config.root, "D:/db")
+
+    def test_legacy_backend_can_be_forced_by_env(self) -> None:
+        """
+        测试内容：显式设置 QMTD_STORAGE_BACKEND=legacy。
+
+        目的：确认默认切 fd 后仍保留旧实现回滚入口。
+        """
+        with mock.patch.dict(os.environ, {"QMTD_STORAGE_BACKEND": "legacy"}, clear=True):
             config = resolve_storage_backend_config(root="D:/db")
 
         self.assertEqual(config.backend, "legacy")
@@ -39,12 +45,10 @@ class TestStorageBackend(unittest.TestCase):
 
     def test_fd_backend_uses_env_root(self) -> None:
         """
-        fd backend 应允许 FD_DATA_ROOT 覆盖数据根目录。
+        测试内容：fd backend 读取 FD_REPO 与 FD_DATA_ROOT。
 
-        Returns:
-            None: 通过断言验证行为。
+        目的：验证生产环境可通过环境变量覆盖 FD 项目路径与数据根目录。
         """
-
         env = {
             "QMTD_STORAGE_BACKEND": "fd",
             "FD_REPO": "D:/fd_repo",
@@ -59,12 +63,10 @@ class TestStorageBackend(unittest.TestCase):
 
     def test_invalid_backend_raises(self) -> None:
         """
-        未知后端名称应直接报错，避免静默走错链路。
+        测试内容：传入未知 backend 名称。
 
-        Returns:
-            None: 通过断言验证行为。
+        目的：避免配置错误时静默走错入库链路。
         """
-
         with self.assertRaises(ValueError):
             resolve_storage_backend_config(root="D:/db", backend="bad")
 

@@ -262,6 +262,29 @@ def _resolve_end_time(end_text: str) -> str:
     return (pd.Timestamp.now(tz=CN_TZ) + pd.Timedelta(days=1)).strftime("%Y%m%d")
 
 
+def _is_daily_cycle(cycle: str) -> bool:
+    """判断是否为日线周期。"""
+    return str(cycle).strip().lower() in {"1d", "1day", "1日", "day", "d"}
+
+
+def _resolve_cycle_end_time(end_text: str, cycle: str, backend: str) -> str:
+    """
+    按 backend 与周期解析本次请求 end。
+
+    说明：
+        - FD core 坚持半开区间契约，不在 FD 层做兼容；
+        - QMTD 为兼容旧业务直觉，仅对 fd backend 的日线显式 end 做 end+1；
+        - end 为空时原逻辑已取“当前日期+1天”，无需再次追加。
+    """
+    end_use = _resolve_end_time(end_text)
+    if not end_text or backend != "fd" or not _is_daily_cycle(cycle):
+        return end_use
+    try:
+        return (pd.to_datetime(end_use, errors="raise") + pd.Timedelta(days=1)).strftime("%Y%m%d")
+    except Exception:
+        return end_use
+
+
 def _probe_xtdata(xtdata_mod: Any, target: IngestTarget, cycle: str, start: str, end: str) -> None:
     """运行前探针：提前验证 xtdata 可用性。"""
     try:
@@ -428,19 +451,18 @@ def run_ingest(profile: IngestProfile) -> dict[str, Any]:
     targets = _build_targets(profile)
     start_wall = perf_counter()
     xtdata_mod = _import_xtdata()
-    end_use = _resolve_end_time(profile.end)
+    storage_config = resolve_storage_backend_config(
+        root=profile.root,
+        backend=profile.storage_backend or None,
+        fd_repo=profile.fd_repo or None,
+    )
+    probe_end = _resolve_cycle_end_time(profile.end, profile.cycles[0], storage_config.backend)
     _probe_xtdata(
         xtdata_mod=xtdata_mod,
         target=targets[0],
         cycle=profile.cycles[0],
         start=profile.start,
-        end=end_use,
-    )
-
-    storage_config = resolve_storage_backend_config(
-        root=profile.root,
-        backend=profile.storage_backend or None,
-        fd_repo=profile.fd_repo or None,
+        end=probe_end,
     )
     storage = build_storage_backend(storage_config)
     ingestor = MarketDataIngestor(storage)
@@ -451,6 +473,7 @@ def run_ingest(profile: IngestProfile) -> dict[str, Any]:
     failed_tasks = 0
     ok_files: list[str] = []
     failed_msgs: list[str] = []
+    end_use = _resolve_end_time(profile.end)
 
     print(
         f"[入库总览] 模式={profile.name} 标的={len(targets)} 周期={len(profile.cycles)} "
@@ -463,6 +486,7 @@ def run_ingest(profile: IngestProfile) -> dict[str, Any]:
 
     seq = 0
     for cycle in profile.cycles:
+        end_use = _resolve_cycle_end_time(profile.end, cycle, storage_config.backend)
         base_source = XtdataSource(xtdata=xtdata_mod, download=not profile.skip_download)
         for target in targets:
             seq += 1
