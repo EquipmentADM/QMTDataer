@@ -88,15 +88,15 @@ def run_service(host: str, port: int, base_dir: str) -> int:
     )
     try:
         runtime_info = runtime.prepare()
-    except Exception as exc:
-        logger.error("服务启动失败：无法完成运行时准备：%s", exc)
+    except Exception:
+        logger.exception("服务启动失败：无法完成运行时准备。")
         return 2
 
     state = BridgeServiceState(runtime=runtime)
     try:
         server = create_http_server(host, port, state)
-    except Exception as exc:
-        logger.error("服务启动失败：无法绑定 %s:%s，错误：%s", host, port, exc)
+    except Exception:
+        logger.exception("服务启动失败：无法绑定 %s:%s。", host, port)
         runtime.cleanup()
         return 3
 

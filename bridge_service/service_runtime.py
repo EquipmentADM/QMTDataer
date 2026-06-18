@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -73,15 +74,71 @@ def is_pid_running(pid: int) -> bool:
     """
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _is_pid_running_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    except SystemError:
+        return False
     except OSError:
         return False
     return True
+
+
+def _is_pid_running_windows(pid: int) -> bool:
+    """
+    使用 Windows API 判断 pid 是否仍然存活。
+
+    说明：
+        - Windows 上 os.kill(pid, 0) 对部分异常 pid 会抛出底层包装错误；
+        - 这里直接调用 OpenProcess/GetExitCodeProcess，避免运行时准备阶段被打断。
+    """
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        process_query_limited_information = 0x1000
+        still_active = 259
+        error_access_denied = 5
+        error_invalid_parameter = 87
+
+        handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+        if not handle:
+            error_code = kernel32.GetLastError()
+            if error_code == error_access_denied:
+                return True
+            if error_code == error_invalid_parameter:
+                return False
+            return False
+
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return False
+
+
+def is_port_listening(host: str, port: int, timeout: float = 0.25) -> bool:
+    """
+    判断本地服务端口是否可连接。
+
+    说明：
+        - 用于识别 stale runtime/lock；
+        - 若 pid 存在但端口未监听，说明旧 bridge 实例对主控不可用，应允许清理后重启。
+    """
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 @dataclass
@@ -148,6 +205,7 @@ class ServiceRuntime:
             ServiceRuntimeInfo：当前实例的完整运行时信息。
         """
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        self._cleanup_stale_runtime_state()
         self._acquire_lock()
         self.instance_id = str(uuid.uuid4())
         self.started_at = _now_iso()
@@ -212,6 +270,68 @@ class ServiceRuntime:
 
     # ---- 启动锁 ----
 
+    # ---- 陈旧运行时清理 ----
+
+    def _cleanup_stale_runtime_state(self) -> None:
+        """
+        清理不可用的历史 runtime/lock。
+
+        判定规则：
+            - pid 不存在，视为 stale；
+            - pid 存在但端口未监听，视为 stale；
+            - JSON 损坏或关键字段缺失，视为 stale。
+        """
+        stale_detected = False
+        active_detected = False
+        for path in (self.runtime_file, self.lock_file):
+            payload = self._read_json_file(path)
+            if payload is None:
+                if path.exists():
+                    stale_detected = True
+                continue
+            if self._is_payload_active(payload):
+                active_detected = True
+            else:
+                stale_detected = True
+
+        if active_detected:
+            return
+        if stale_detected:
+            _safe_unlink(self.runtime_file)
+            _safe_unlink(self.lock_file)
+
+    def _read_json_file(self, path: Path) -> Optional[dict[str, Any]]:
+        """读取 JSON 文件；文件不存在、损坏或内容非字典时返回 None。"""
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    def _is_payload_active(self, payload: dict[str, Any]) -> bool:
+        """
+        判断 runtime/lock 指向的旧实例是否仍然可用。
+
+        说明：
+            - 只要 pid 不存活或端口不可连接，就不能让旧记录阻塞新实例启动；
+            - host/port 缺失时回退到当前服务配置，兼容旧版 lock 文件。
+        """
+        try:
+            pid = int(payload.get("pid") or 0)
+            port = int(payload.get("port") or self.port)
+        except (TypeError, ValueError):
+            return False
+        host = str(payload.get("host") or self.host)
+        if not is_pid_running(pid):
+            return False
+        if not is_port_listening(host, port):
+            return False
+        return True
+
     def _acquire_lock(self) -> None:
         """
         抢占启动锁。
@@ -268,8 +388,8 @@ class ServiceRuntime:
             _safe_unlink(self.lock_file)
             return True
 
-        pid = int(payload.get("pid") or 0)
-        if not is_pid_running(pid):
+        if not self._is_payload_active(payload):
+            _safe_unlink(self.runtime_file)
             _safe_unlink(self.lock_file)
             return True
         return False

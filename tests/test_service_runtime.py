@@ -49,6 +49,54 @@ class TestServiceRuntime(unittest.TestCase):
                 runtime.prepare()
             self.assertTrue(runtime.lock_file.exists())
 
+    def test_stale_runtime_and_lock_when_port_not_listening_will_be_cleaned(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            runtime = ServiceRuntime(base_dir=base_dir, port=19933)
+            runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "module_id": "qmtdataer",
+                "pid": 999999,
+                "host": "127.0.0.1",
+                "port": 19933,
+                "started_at": "2026-04-23T11:24:46",
+            }
+            runtime.runtime_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            runtime.lock_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            with (
+                patch("bridge_service.service_runtime.is_pid_running", return_value=True),
+                patch("bridge_service.service_runtime.is_port_listening", return_value=False),
+            ):
+                info = runtime.prepare()
+
+            self.assertTrue(runtime.lock_file.exists())
+            self.assertTrue(runtime.runtime_file.exists())
+            self.assertEqual(info.pid, runtime.get_runtime_snapshot()["pid"])
+            self.assertNotEqual("2026-04-23T11:24:46", runtime.get_runtime_snapshot()["started_at"])
+
+    def test_active_runtime_and_lock_will_block_new_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            runtime = ServiceRuntime(base_dir=base_dir, port=19934)
+            runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "module_id": "qmtdataer",
+                "pid": 999999,
+                "host": "127.0.0.1",
+                "port": 19934,
+                "started_at": "2026-04-23T11:24:46",
+            }
+            runtime.runtime_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            runtime.lock_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            with (
+                patch("bridge_service.service_runtime.is_pid_running", return_value=True),
+                patch("bridge_service.service_runtime.is_port_listening", return_value=True),
+            ):
+                with self.assertRaises(RuntimeError):
+                    runtime.prepare()
+
     def test_get_runtime_snapshot_without_runtime_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime = ServiceRuntime(base_dir=Path(tmpdir), port=19932)
