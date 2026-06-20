@@ -175,6 +175,45 @@ class TestFDStorageAdapter(unittest.TestCase):
             self.assertFalse(parsed.duplicated().any())
             self.assertEqual(loaded["close"].tolist(), [0.5, 2.0, 3.0])
 
+    def test_epoch_millisecond_time_is_written_as_beijing_naive(self) -> None:
+        """
+        验证 epoch 毫秒入库时不会被写成 UTC 墙上时间。
+
+        Returns:
+            None: 通过断言验证行为。
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = FDStorageAdapter(root_dir=tmpdir)
+            epoch_ms = int(pd.Timestamp("2026-01-14 15:00:00", tz="Asia/Shanghai").timestamp() * 1000)
+            df = pd.DataFrame(
+                {
+                    "time": [epoch_ms],
+                    "open": [1.0],
+                    "high": [1.1],
+                    "low": [0.9],
+                    "close": [1.0],
+                    "volume": [100],
+                    "amount": [1000],
+                }
+            )
+            target_dir = adapter._build_target_dir("SS_stock_data", "510050.SH", "1m", "original")
+            out_path = adapter.merge_and_save(
+                df,
+                target_dir,
+                symbol="510050.SH",
+                cycle="1m",
+                specific="original",
+                market="SS_stock_data",
+                file_type="csv",
+            )
+
+            loaded = pd.read_csv(out_path)
+            parsed = pd.to_datetime(loaded["time"], errors="coerce")
+
+            self.assertEqual(parsed.iloc[0], pd.Timestamp("2026-01-14 15:00:00"))
+            self.assertNotEqual(parsed.iloc[0], pd.Timestamp("2026-01-14 07:00:00"))
+
 
 if __name__ == "__main__":
     unittest.main()

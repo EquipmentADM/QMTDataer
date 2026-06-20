@@ -37,6 +37,8 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 
+from core.time_utils import parse_local_naive_time_series
+
 CN_TZ = timezone(timedelta(hours=8))
 
 # QMT xtdata
@@ -543,41 +545,10 @@ class RealtimeSubscriptionService:
     def _normalize_bar_end_ts(raw: Any) -> Optional[str]:
         if raw is None:
             return None
-        try:
-            if isinstance(raw, (int, float)):
-                ts = float(raw)
-                if ts > 1e12:
-                    dt = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
-                else:
-                    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                dt = dt.astimezone(CN_TZ).replace(tzinfo=None)
-                return dt.strftime("%Y-%m-%dT%H:%M:%S")
-            s = str(raw).strip()
-            if not s:
-                return None
-            if s.isdigit():
-                if len(s) == 14:
-                    dt = datetime.strptime(s, "%Y%m%d%H%M%S").replace(tzinfo=CN_TZ)
-                    dt = dt.astimezone(CN_TZ).replace(tzinfo=None)
-                    return dt.strftime("%Y-%m-%dT%H:%M:%S")
-                if len(s) == 8:
-                    dt = datetime.strptime(s, "%Y%m%d").replace(tzinfo=CN_TZ)
-                    dt = dt.astimezone(CN_TZ).replace(tzinfo=None)
-                    return dt.strftime("%Y-%m-%dT%H:%M:%S")
-            if "T" not in s:
-                s = s.replace(" ", "T")
-            if s.endswith("Z"):
-                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-            else:
-                if "+" not in s:
-                    s = f"{s}+08:00"
-                dt = datetime.fromisoformat(s)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=CN_TZ)
-            dt = dt.astimezone(CN_TZ).replace(tzinfo=None)
-            return dt.strftime("%Y-%m-%dT%H:%M:%S")
-        except Exception:
+        parsed = parse_local_naive_time_series(pd.Series([raw])).iloc[0]
+        if pd.isna(parsed):
             return None
+        return pd.Timestamp(parsed).strftime("%Y-%m-%dT%H:%M:%S")
 
     def _register_one(self, code: str, period: str) -> Any:
         """方法说明：注册单标的/单周期订阅（官方签名回调）

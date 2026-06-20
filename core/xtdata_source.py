@@ -9,18 +9,18 @@ xtdata 数据源适配与最小入库工具
 设计说明：
     - 仅处理常见 K 线周期（1m/5m/15m/30m/60m/1d 等，xtdata 支持为准）；
     - fetch 返回标准 DataFrame，至少包含 time/open/high/low/close/volume/amount；
-    - time 统一为 ISO8601（+08:00）字符串，便于落盘/序列化。
+    - time 统一为本地无时区 ISO8601 字符串，便于落盘/序列化。
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 
 import pandas as pd
 
-CN_TZ = timezone(timedelta(hours=8))
+from core.time_utils import parse_local_naive_time_series
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,7 +77,7 @@ class XtdataSource(BaseMarketDataSource):
             start   : 开始时间，xtdata 支持 YYYYMMDD 或 YYYYMMDDHHMMSS，为空表示最早
             end     : 结束时间，为空表示当前
         返回：
-            DataFrame，包含 time/open/high/low/close/volume/amount 等列，time 为 ISO8601(+08:00)
+            DataFrame，包含 time/open/high/low/close/volume/amount 等列，time 为本地无时区 ISO8601
         """
         xt_period = self._to_xtdata_period(cycle)
         if self.download:
@@ -189,40 +189,10 @@ class XtdataSource(BaseMarketDataSource):
         """将时间统一为本地无时区的 ISO8601 字符串（YYYY-MM-DDTHH:MM:SS）。"""
         if pd.isna(raw):
             return ""
-        try:
-            if isinstance(raw, (int, float)):
-                ts = float(raw)
-                if ts >= 1e12:
-                    dt = datetime.fromtimestamp(ts / 1000.0, tz=CN_TZ)
-                elif ts >= 1e9:
-                    dt = datetime.fromtimestamp(ts, tz=CN_TZ)
-                else:
-                    # YYYYMMDD 或秒级时间戳，尝试字符串处理
-                    s = str(int(ts)).zfill(8)
-                    return XtdataSource._format_time(s)
-                return dt.astimezone(CN_TZ).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S")
-            s = str(raw).strip()
-            if len(s) == 14 and s.isdigit():
-                dt = datetime.strptime(s, "%Y%m%d%H%M%S").replace(tzinfo=CN_TZ)
-                return dt.astimezone(CN_TZ).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S")
-            if len(s) == 8 and s.isdigit():
-                dt = datetime.strptime(s, "%Y%m%d").replace(tzinfo=CN_TZ)
-                return dt.astimezone(CN_TZ).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S")
-            # 回退直接解析，若缺时区则补 +08:00
-            if "T" not in s and " " in s:
-                s = s.replace(" ", "T")
-            if "Z" in s:
-                s = s.replace("Z", "+00:00")
-            if "+" not in s:
-                s = f"{s}+08:00"
-            return (
-                datetime.fromisoformat(s)
-                .astimezone(CN_TZ)
-                .replace(tzinfo=None)
-                .strftime("%Y-%m-%dT%H:%M:%S")
-            )
-        except Exception:
+        parsed = parse_local_naive_time_series(pd.Series([raw])).iloc[0]
+        if pd.isna(parsed):
             return str(raw)
+        return pd.Timestamp(parsed).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 @dataclass

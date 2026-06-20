@@ -25,6 +25,8 @@ from typing import Any, Optional, Sequence
 
 import pandas as pd
 
+from core.time_utils import parse_local_naive_time_series
+
 
 DEFAULT_FD_REPO = Path(r"D:\Work\Quant\PythonProject\FD独立化迁移\FD独立项目原型")
 
@@ -106,27 +108,7 @@ class FDStorageAdapter:
             pd.Series: tz-naive datetime64[ns] 序列。
         """
 
-        if pd.api.types.is_numeric_dtype(series):
-            max_abs = series.dropna().abs().max() if not series.dropna().empty else 0
-            if max_abs >= 1_000_000_000_000:
-                parsed = pd.to_datetime(series, errors="coerce", unit="ms")
-            elif max_abs >= 1_000_000_000:
-                parsed = pd.to_datetime(series, errors="coerce", unit="s")
-            else:
-                parsed = pd.to_datetime(series, errors="coerce")
-        else:
-            text = series.astype("string").str.strip()
-            # pandas 2.x 在混合 "YYYY-MM-DD" 与 "YYYY-MM-DDTHH:MM:SS" 时会严格按首个格式推断。
-            # 这里先把 T 转为空格，规避 FD merge 内部混合格式解析丢行问题。
-            text = text.str.replace("T", " ", regex=False)
-            try:
-                parsed = pd.to_datetime(text, errors="coerce", format="mixed")
-            except TypeError:
-                parsed = pd.to_datetime(text, errors="coerce")
-
-        if isinstance(parsed.dtype, pd.DatetimeTZDtype):
-            parsed = parsed.dt.tz_localize(None)
-        return pd.to_datetime(parsed, errors="coerce")
+        return parse_local_naive_time_series(series)
 
     def _normalize_existing_time_file(
         self,

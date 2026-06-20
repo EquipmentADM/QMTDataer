@@ -143,12 +143,14 @@ class TestRealtimeService(unittest.TestCase):
 
         datas = {
             "000001.SZ": [
-                {"time": "20250101 09:31:00", "open": 1, "high": 2, "low": 1, "close": 1.5, "isClosed": True}
+                {"time": "20250101 09:31:00", "open": 1, "high": 2, "low": 1, "close": 1.5, "isClosed": True},
+                {"time": "20250101 09:32:00", "open": 1, "high": 2, "low": 1, "close": 1.6, "isClosed": True},
             ]
         }
         svc._on_datas("1m", datas)
         self.assertEqual(len(pub.messages), 1)
         self.assertTrue(pub.messages[0]["is_closed"])
+        self.assertEqual(pub.messages[0]["bar_end_ts"], "2025-01-01T09:31:00")
 
         # 再次推送同一条，触发去重
         svc._on_datas("1m", datas)
@@ -165,10 +167,11 @@ class TestRealtimeService(unittest.TestCase):
         svc = RealtimeSubscriptionService(cfg, pub)
 
         svc._on_datas("1m", {"000001.SZ": [{"time": "20250101 09:31:00", "close": 1.1, "isClosed": False}]})
-        svc._on_datas("1m", {"000001.SZ": [{"time": "20250101 09:31:00", "close": 1.2, "isClosed": True}]})
-        self.assertEqual(len(pub.messages), 2)
+        svc._on_datas("1m", {"000001.SZ": [{"time": "20250101 09:32:00", "close": 1.2, "isClosed": True}]})
+        self.assertEqual(len(pub.messages), 3)
         self.assertFalse(pub.messages[0]["is_closed"])
         self.assertTrue(pub.messages[1]["is_closed"])
+        self.assertFalse(pub.messages[2]["is_closed"])
 
     def test_get_market_data_exception(self):
         """测试内容：模拟回调异常时不崩溃
@@ -201,3 +204,14 @@ class TestRealtimeService(unittest.TestCase):
             self.assertEqual(len(cache.calls), 0)
             self.assertEqual(msub.call_count, 1)
             self.assertEqual(mrun.call_count, 1)
+
+    def test_normalize_epoch_millisecond_to_local_naive(self):
+        """测试内容：实时 bar 时间戳按北京时间无时区输出。"""
+        _reload_realtime_fresh()
+        from core.realtime_service import RealtimeSubscriptionService
+
+        epoch_ms = int(pd.Timestamp("2026-01-14 15:00:00", tz="Asia/Shanghai").timestamp() * 1000)
+        normalized = RealtimeSubscriptionService._normalize_bar_end_ts(epoch_ms)
+
+        self.assertEqual(normalized, "2026-01-14T15:00:00")
+        self.assertNotEqual(normalized, "2026-01-14T07:00:00")

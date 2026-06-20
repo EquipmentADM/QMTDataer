@@ -22,6 +22,8 @@ from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
 
+from core.time_utils import parse_local_naive_time_series
+
 
 @dataclass
 class FinancialDataStorage:
@@ -138,72 +140,7 @@ class FinancialDataStorage:
           - 字符串/对象：分段按常见格式解析，剩余值逐条兜底解析
         返回 tz-naive 的 datetime64[ns] 序列，解析失败为 NaT。
         """
-        s = series
-        if pd.api.types.is_numeric_dtype(s):
-            # 判断数量级：>=1e12 视为毫秒，>=1e9 视为秒
-            max_abs = s.dropna().abs().max() if len(s.dropna()) > 0 else 0
-            unit = "ms" if max_abs >= 1e12 else "s" if max_abs >= 1e9 else None
-            if unit:
-                parsed = pd.to_datetime(s, errors="coerce", unit=unit)
-            else:
-                parsed = pd.to_datetime(s, errors="coerce")
-        else:
-            # ---- 分段解析，避免混合格式触发全量逐条推断警告 ----
-            s_str = s.astype("string").str.strip()
-            parsed = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
-
-            non_empty = s_str.notna() & (s_str != "")
-            if non_empty.any():
-                # 1) 纯数字时间
-                m14 = non_empty & s_str.str.fullmatch(r"\d{14}")
-                if m14.any():
-                    parsed.loc[m14] = pd.to_datetime(s_str.loc[m14], format="%Y%m%d%H%M%S", errors="coerce")
-
-                m8 = non_empty & s_str.str.fullmatch(r"\d{8}")
-                if m8.any():
-                    parsed.loc[m8] = pd.to_datetime(s_str.loc[m8], format="%Y%m%d", errors="coerce")
-
-                m13 = non_empty & s_str.str.fullmatch(r"\d{13}")
-                if m13.any():
-                    parsed.loc[m13] = pd.to_datetime(
-                        pd.to_numeric(s_str.loc[m13], errors="coerce"), unit="ms", errors="coerce"
-                    )
-
-                m10 = non_empty & s_str.str.fullmatch(r"\d{10}")
-                if m10.any():
-                    parsed.loc[m10] = pd.to_datetime(
-                        pd.to_numeric(s_str.loc[m10], errors="coerce"), unit="s", errors="coerce"
-                    )
-
-                # 2) 常见字符串格式
-                formats = (
-                    "%Y-%m-%dT%H:%M:%S",
-                    "%Y-%m-%d %H:%M:%S",
-                    "%Y/%m/%d %H:%M:%S",
-                    "%Y-%m-%d",
-                    "%Y/%m/%d",
-                )
-                for fmt in formats:
-                    remain = non_empty & parsed.isna()
-                    if not remain.any():
-                        break
-                    parsed.loc[remain] = pd.to_datetime(s_str.loc[remain], format=fmt, errors="coerce")
-
-                # 3) 兜底逐条解析（仅剩余未命中项，数量通常很少）
-                remain = non_empty & parsed.isna()
-                if remain.any():
-                    parsed.loc[remain] = s_str.loc[remain].apply(lambda x: pd.to_datetime(x, errors="coerce"))
-
-        # 去除时区信息（保持本地墙上时间）
-        try:
-            if hasattr(parsed.dt, "tz") and parsed.dt.tz is not None:
-                parsed = parsed.dt.tz_localize(None)
-        except Exception:
-            parsed = parsed.apply(
-                lambda x: x.tz_localize(None) if isinstance(x, pd.Timestamp) and x.tzinfo is not None else x
-            )
-            parsed = pd.to_datetime(parsed, errors="coerce")
-        return parsed
+        return parse_local_naive_time_series(series)
 
     def _build_filename(
         self,
