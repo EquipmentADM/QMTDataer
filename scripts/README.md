@@ -75,6 +75,9 @@ python -m scripts.xtdata_ingest recent-backfill --lookback 3
 - `send_control_cmd.py`
   - 用途：向控制面发送 `subscribe/unsubscribe/status` 命令。
 
+- `show_realtime_status.py`
+  - 用途：发送 `status` 并等待 ACK，直接打印当前活跃订阅、引用计数和最近发布时间。
+
 - `cleanup_realtime_registry.py`
   - 用途：清理 Redis Registry 中残留的实时订阅 `sub_id` 记录。
   - 场景：诊断时发现顶层 `subs` 有历史遗留记录，可先 dry-run 预览，再按策略或全量清理。

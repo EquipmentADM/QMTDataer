@@ -10,6 +10,8 @@ from unittest import mock
 import sys
 import os
 import tempfile
+import io
+from contextlib import redirect_stdout
 
 
 class TestCLIScripts(unittest.TestCase):
@@ -130,3 +132,31 @@ control:
 
         loaded_path = mocked_load.call_args.args[0].replace("\\", "/")
         self.assertTrue(loaded_path.endswith("config/realtime_control.yml"))
+
+    def test_show_realtime_status_prints_active_subs(self):
+        """测试内容：状态查询脚本打印当前活跃订阅
+        目的：验证 Redis 查询入口能输出 ref_count 与最近发布时间。
+        输入：mock status ACK。
+        预期输出：返回码为 0，输出包含 code/period/ref_count。
+        """
+        from scripts import show_realtime_status
+
+        fake_payload = {
+            "ok": True,
+            "action": "status",
+            "status": {
+                "subs": [{"code": "510050.SH", "period": "1m", "ref_count": 2}],
+                "last_published": {"510050.SH|1m": 123.0},
+            },
+            "subs": ["sub-a"],
+        }
+
+        with mock.patch.object(show_realtime_status, "query_status", return_value=fake_payload):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = show_realtime_status.main(["--strategy-id", "demo"])
+
+        output = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("510050.SH 1m ref_count=2", output)
+        self.assertIn("510050.SH|1m: 123.0", output)

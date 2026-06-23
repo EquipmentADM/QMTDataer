@@ -38,6 +38,25 @@ class TestIngestRunner(unittest.TestCase):
         self.assertTrue(recent_backfill.auto_start)
         self.assertGreaterEqual(recent_backfill.lookback, 1)
 
+    def test_recent_profile_uses_wide_narrow_base_stock_pool(self):
+        """
+        校验 recent 默认股票池使用宽窄基股票池。
+
+        Returns:
+            None
+        """
+        stock_pool = ingest_runner.WIDE_NARROW_BASE_STOCK_SYMBOLS
+        recent_backfill = ingest_runner.build_profile("recent-backfill")
+        recent_stock_count = len(stock_pool)
+
+        self.assertEqual(len(stock_pool), len(set(stock_pool)))
+        self.assertEqual(ingest_runner.DEFAULT_STOCK_SYMBOLS, stock_pool)
+        self.assertEqual(ingest_runner.DEFAULT_STOCK_SYMBOLS_RECENT, stock_pool)
+        self.assertEqual(recent_backfill.symbols[:recent_stock_count], stock_pool)
+        self.assertIn("511090.SH", stock_pool)
+        self.assertIn("512880.SH", stock_pool)
+        self.assertNotIn("000001.SH", stock_pool)
+
     def test_build_profile_overrides(self):
         """
         校验 profile 覆盖参数是否生效。

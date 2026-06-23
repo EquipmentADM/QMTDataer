@@ -31,7 +31,8 @@ DEFAULT_MARKET = "SS_stock_data"
 DEFAULT_SPECIFIC = "original"
 DEFAULT_CYCLES = ("1d", "1m")
 
-DEFAULT_STOCK_SYMBOLS = (
+WIDE_NARROW_BASE_STOCK_SYMBOLS = (
+    "511090.SH",
     "159915.SZ",
     "518880.SH",
     "513880.SH",
@@ -40,26 +41,11 @@ DEFAULT_STOCK_SYMBOLS = (
     "513080.SH",
     "513180.SH",
     "510300.SH",
-    "511090.SH",
-    "511010.SH",
     "159980.SZ",
     "159552.SZ",
-    "563300.SH",
-    "563680.SH",
-    "515790.SH",
-    "513130.SH",
-    "512480.SH",
-    "510050.SH",
-    "000001.SH",
-    "563580.SH",
-    "510880.SH",
-    "159985.SZ",
-    "513400.SH",
-    "513520.SH",
-    "513600.SH",
-    "159119.SZ",
     "164824.SZ",
     "510210.SH",
+    "510050.SH",
     "510500.SH",
     "159845.SZ",
     "588000.SH",
@@ -70,6 +56,7 @@ DEFAULT_STOCK_SYMBOLS = (
     "510410.SH",
     "515220.SH",
     "513310.SH",
+    "512480.SH",
     "510230.SH",
     "512000.SH",
     "512710.SH",
@@ -85,15 +72,18 @@ DEFAULT_STOCK_SYMBOLS = (
     "562500.SH",
     "513120.SH",
     "561800.SH",
+    "513400.SH",
     "513190.SH",
     "512770.SH",
     "560610.SH",
+    "513520.SH",
     "510150.SH",
     "516020.SH",
     "515980.SH",
     "513590.SH",
     "515000.SH",
     "515230.SH",
+    "513130.SH",
     "515120.SH",
     "513530.SH",
     "512070.SH",
@@ -107,13 +97,27 @@ DEFAULT_STOCK_SYMBOLS = (
     "159509.SZ",
     "159326.SZ",
     "159697.SZ",
+    "512170.SH",
+    "159876.SZ",
+    "512400.SH",
+    "159870.SZ",
+    "516520.SH",
+    "159755.SZ",
+    "159625.SZ",
+    "159792.SZ",
+    "159636.SZ",
+    "159941.SZ",
+    "513090.SH",
+    "159928.SZ",
+    "159994.SZ",
+    "512760.SH",
+    "515260.SH",
+    "515290.SH",
+    "512880.SH",
 )
 
-DEFAULT_STOCK_SYMBOLS_RECENT = (
-    "513880.SH",
-    "518880.SH",
-    "000001.SH",
-)
+DEFAULT_STOCK_SYMBOLS = WIDE_NARROW_BASE_STOCK_SYMBOLS
+DEFAULT_STOCK_SYMBOLS_RECENT = WIDE_NARROW_BASE_STOCK_SYMBOLS
 
 # 常用期货池：黑色系、化工、股指、贵金属。
 DEFAULT_FUTURES_SYMBOLS = (
