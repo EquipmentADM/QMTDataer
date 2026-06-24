@@ -5,7 +5,7 @@ BTLive 标准 1min Mock 实时行情常开入口。
 职责：
     - 固定推送 BTLive/QMTD 联调用的 5 个常用标的。
     - 强制启用 Mock 行情，不依赖真实 xtdata 实时订阅。
-    - 使用 close_only 模式，默认每 60 秒推送一次完整 1min bar。
+    - 使用 close_only 模式，默认每 5 秒推送一次完整 1min bar。
     - 保持 Redis topic 与真实实时行情一致，便于 BTLive 无缝切换测试。
 
 使用方式：
@@ -61,7 +61,7 @@ def _load_base_config(config_path: Optional[str]):
 def build_btlive_mock_config(
     *,
     config_path: Optional[str] = None,
-    step_seconds: float = 60.0,
+    step_seconds: float = 5.0,
     seed: Optional[int] = None,
 ):
     """
@@ -69,7 +69,7 @@ def build_btlive_mock_config(
 
     Args:
         config_path (Optional[str]): 可选基础 yml 配置路径。
-        step_seconds (float): Mock 生成节奏，默认 60 秒。
+        step_seconds (float): Mock 生成节奏，默认 5 秒。
         seed (Optional[int]): 随机种子，默认沿用配置。
 
     Returns:
@@ -107,7 +107,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     """
     parser = argparse.ArgumentParser(description="BTLive 标准 1min Mock 行情常开入口")
     parser.add_argument("--config", help="可选基础 YAML 配置路径", required=False)
-    parser.add_argument("--step-seconds", type=float, default=60.0, help="Mock 推送节奏，默认 60 秒")
+    parser.add_argument("--step-seconds", type=float, default=5.0, help="Mock 推送节奏，默认 5 秒")
     parser.add_argument("--seed", type=int, help="可选随机种子", required=False)
     args = parser.parse_args(argv)
 

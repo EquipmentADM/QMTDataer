@@ -21,7 +21,7 @@ mock:
   enabled: true
   base_price: 10.0
   volatility: 0.002
-  step_seconds: 60.0
+  step_seconds: 5.0
   seed: null
   volume_mean: 1000000
   volume_std: 200000

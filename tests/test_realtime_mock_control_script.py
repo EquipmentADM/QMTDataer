@@ -84,7 +84,7 @@ control:
         fake_cfg.redis.topic = "xt:topic:bar"
         fake_cfg.mock.enabled = True
         fake_cfg.mock.source = "mock"
-        fake_cfg.mock.step_seconds = 60.0
+        fake_cfg.mock.step_seconds = 5.0
         fake_cfg.mock.seed = None
 
         with mock.patch.object(run_realtime_mock_control.Path, "exists", return_value=True), \
@@ -94,6 +94,37 @@ control:
 
         loaded_path = mocked_load.call_args.args[0].replace("\\", "/")
         self.assertTrue(loaded_path.endswith("config/realtime_mock_control.yml"))
+
+    def test_btlive_mock_pool_defaults_to_five_seconds(self) -> None:
+        """
+        验证 BTLive 常开 Mock 行情入口默认使用 5 秒节奏。
+
+        Returns:
+            None: 通过断言验证默认配置。
+        """
+
+        from scripts import run_btlive_mock_1min_pool
+
+        fake_cfg = mock.Mock()
+        fake_cfg.subscription.codes = []
+        fake_cfg.subscription.periods = []
+        fake_cfg.subscription.mode = ""
+        fake_cfg.subscription.preload_days = 3
+        fake_cfg.redis.topic = ""
+        fake_cfg.mock.enabled = False
+        fake_cfg.mock.step_seconds = 60.0
+        fake_cfg.mock.source = "qmt"
+        fake_cfg.mock.seed = None
+        fake_cfg.control.enabled = False
+
+        with mock.patch.object(run_btlive_mock_1min_pool, "_load_base_config", return_value=fake_cfg):
+            cfg = run_btlive_mock_1min_pool.build_btlive_mock_config()
+
+        self.assertEqual(cfg.subscription.periods, ["1m"])
+        self.assertEqual(cfg.subscription.mode, "close_only")
+        self.assertTrue(cfg.mock.enabled)
+        self.assertEqual(cfg.mock.source, "mock")
+        self.assertEqual(cfg.mock.step_seconds, 5.0)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
+from datetime import datetime
 import threading
 import time
 import unittest
 from unittest import mock
 
-from core.realtime_service import RealtimeConfig, RealtimeSubscriptionService
+from core.realtime_service import CN_TZ, MockBarFeeder, RealtimeConfig, RealtimeSubscriptionService
 
 
 class DummyPublisher:
+    """测试用发布器：记录 RealtimeSubscriptionService 实际发布的 payload。"""
+
     def __init__(self) -> None:
         self.payloads = []
         self._lock = threading.Lock()
@@ -21,33 +24,39 @@ class DummyPublisher:
             return len(self.payloads)
 
 
+def _build_mock_service(codes=None, step_seconds: float = 0.05):
+    """构造启用 Mock 的实时服务，避免测试触碰真实 xtdata。"""
+    publisher = DummyPublisher()
+    mock_cfg = RealtimeConfig.MockConfig(
+        enabled=True,
+        base_price=100.0,
+        volatility=0.001,
+        step_seconds=step_seconds,
+        seed=42,
+        volume_mean=1000,
+        volume_std=100,
+        source="mock",
+    )
+    cfg = RealtimeConfig(
+        mode="close_only",
+        periods=["1m"],
+        codes=list(codes or []),
+        preload_days=0,
+        mock=mock_cfg,
+    )
+    svc = RealtimeSubscriptionService(cfg, publisher)
+    return svc, publisher, mock_cfg
+
+
 class TestMockModeFeeder(unittest.TestCase):
     def test_mock_mode_generates_bars(self):
-        publisher = DummyPublisher()
-        mock_cfg = RealtimeConfig.MockConfig(
-            enabled=True,
-            base_price=100.0,
-            volatility=0.001,
-            step_seconds=0.05,
-            seed=42,
-            volume_mean=1000,
-            volume_std=100,
-            source="mock",
-        )
-        cfg = RealtimeConfig(
-            mode="close_only",
-            periods=["1m"],
-            codes=["MOCK.SH"],
-            preload_days=0,
-            mock=mock_cfg,
-        )
+        """验证 Mock 模式能产生基础行情 payload。"""
+        svc, publisher, _ = _build_mock_service(codes=["MOCK.SH"])
         with mock.patch("core.realtime_service.xtdata", None):
-            svc = RealtimeSubscriptionService(cfg, publisher)
-
             worker = threading.Thread(target=svc.run_forever, daemon=True)
             worker.start()
             try:
-                time.sleep(0.6)  # 等待 mock feeder 产出若干条
+                time.sleep(0.6)
             finally:
                 svc.stop()
                 worker.join(timeout=2.0)
@@ -58,34 +67,10 @@ class TestMockModeFeeder(unittest.TestCase):
         self.assertTrue(all(bar.get("source") == "mock" for bar in publisher.payloads))
 
     def test_mock_blank_start_subscribe_and_unsubscribe(self):
-        """测试内容：Mock 空启动后动态订阅与退订。
-
-        目的：
-            - 验证初始 codes=[] 时不会主动推送；
-            - 验证运行中 add_subscription 后可生成 Mock 行情；
-            - 验证 remove_subscription 后活跃订阅清空，后续不再继续推送该流。
-        """
-        publisher = DummyPublisher()
-        mock_cfg = RealtimeConfig.MockConfig(
-            enabled=True,
-            base_price=100.0,
-            volatility=0.001,
-            step_seconds=0.05,
-            seed=11,
-            volume_mean=1000,
-            volume_std=100,
-            source="mock",
-        )
-        cfg = RealtimeConfig(
-            mode="close_only",
-            periods=["1m"],
-            codes=[],
-            preload_days=0,
-            mock=mock_cfg,
-        )
+        """验证 Mock 空启动后动态订阅与退订。"""
+        svc, publisher, _ = _build_mock_service(codes=[])
 
         with mock.patch("core.realtime_service.xtdata", None):
-            svc = RealtimeSubscriptionService(cfg, publisher)
             worker = threading.Thread(target=svc.run_forever, daemon=True)
             worker.start()
             try:
@@ -109,7 +94,6 @@ class TestMockModeFeeder(unittest.TestCase):
                     time.sleep(0.03)
                 self.assertEqual(svc.status()["subs"], [])
 
-                # 给 feeder 一个周期消化退订，随后确认不再持续新增该流。
                 time.sleep(0.12)
                 count_after_remove = publisher.count()
                 time.sleep(0.18)
@@ -117,6 +101,117 @@ class TestMockModeFeeder(unittest.TestCase):
             finally:
                 svc.stop()
                 worker.join(timeout=2.0)
+
+    def test_cn_stock_minute_clock_boundaries(self):
+        """验证 A 股 1m 模拟时钟按日内交易时段跳转。"""
+        cases = [
+            (datetime(2026, 1, 14, 9, 29, 30, tzinfo=CN_TZ), "2026-01-14T09:30:00"),
+            (datetime(2026, 1, 14, 10, 12, 34, tzinfo=CN_TZ), "2026-01-14T10:13:00"),
+            (datetime(2026, 1, 14, 11, 30, 0, tzinfo=CN_TZ), "2026-01-14T13:00:00"),
+            (datetime(2026, 1, 14, 11, 45, 0, tzinfo=CN_TZ), "2026-01-14T13:00:00"),
+            (datetime(2026, 1, 14, 15, 0, 0, tzinfo=CN_TZ), "2026-01-15T09:30:00"),
+            (datetime(2026, 1, 14, 20, 0, 0, tzinfo=CN_TZ), "2026-01-15T09:30:00"),
+        ]
+        for source_dt, expected in cases:
+            with self.subTest(source_dt=source_dt):
+                actual = MockBarFeeder._ceil_cn_stock_minute(source_dt)
+                self.assertEqual(actual.replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S"), expected)
+
+        self.assertEqual(
+            MockBarFeeder._next_cn_stock_minute(datetime(2026, 1, 14, 11, 30, tzinfo=CN_TZ))
+            .replace(tzinfo=None)
+            .strftime("%Y-%m-%dT%H:%M:%S"),
+            "2026-01-14T13:00:00",
+        )
+
+    def test_mock_1m_uses_global_clock_for_multiple_symbols(self):
+        """验证同一轮 Mock 推送中多个标的共享同一个 1m 时间戳。"""
+        svc, publisher, mock_cfg = _build_mock_service(codes=[])
+        svc.add_subscription(["MOCK_A.SH", "MOCK_B.SH"], ["1m"], preload_days=0)
+        feeder = MockBarFeeder(svc, mock_cfg)
+        feeder._mock_clock_dt = datetime(2026, 1, 14, 10, 0, tzinfo=CN_TZ)
+
+        with mock.patch("core.realtime_service.xtdata", None):
+            feeder._emit_cycle()
+
+        self.assertEqual(len(publisher.payloads), 2)
+        published_times = {bar["bar_end_ts"] for bar in publisher.payloads}
+        self.assertEqual(published_times, {"2026-01-14T10:00:00"})
+        self.assertEqual(feeder._mock_clock_dt.replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S"), "2026-01-14T10:01:00")
+
+    def test_global_clock_prefers_latest_history_time(self):
+        """验证全局模拟时钟优先使用订阅集合里的最大历史时间。"""
+        svc, publisher, mock_cfg = _build_mock_service(codes=[])
+        svc.add_subscription(["MOCK_A.SH", "MOCK_B.SH"], ["1m"], preload_days=0)
+        feeder = MockBarFeeder(svc, mock_cfg)
+
+        baselines = {
+            ("MOCK_A.SH", "1m"): MockBarFeeder._HistoryBaseline(
+                base_price=100.0,
+                vol=0.001,
+                latest_dt=datetime(2026, 1, 14, 10, 0, tzinfo=CN_TZ),
+            ),
+            ("MOCK_B.SH", "1m"): MockBarFeeder._HistoryBaseline(
+                base_price=101.0,
+                vol=0.001,
+                latest_dt=datetime(2026, 1, 14, 11, 30, tzinfo=CN_TZ),
+            ),
+        }
+
+        with mock.patch.object(feeder, "_history_baseline", side_effect=lambda code, period: baselines[(code, period)]):
+            feeder._emit_cycle()
+
+        self.assertEqual(len(publisher.payloads), 2)
+        published_times = {bar["bar_end_ts"] for bar in publisher.payloads}
+        self.assertEqual(published_times, {"2026-01-14T13:00:00"})
+        self.assertEqual(feeder._mock_clock_dt.replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S"), "2026-01-14T13:01:00")
+
+    def test_late_subscription_aligns_to_existing_global_clock(self):
+        """验证运行中新订阅标的直接对齐当前全局模拟时钟。"""
+        svc, publisher, mock_cfg = _build_mock_service(codes=[])
+        svc.add_subscription(["MOCK_A.SH", "MOCK_B.SH"], ["1m"], preload_days=0)
+        feeder = MockBarFeeder(svc, mock_cfg)
+        feeder._mock_clock_dt = datetime(2026, 1, 14, 10, 0, tzinfo=CN_TZ)
+
+        with mock.patch("core.realtime_service.xtdata", None):
+            feeder._emit_cycle()
+            publisher.payloads.clear()
+
+            svc.add_subscription(["MOCK_C.SH"], ["1m"], preload_days=0)
+            feeder._emit_cycle()
+
+        by_code = {bar["code"]: bar["bar_end_ts"] for bar in publisher.payloads}
+        self.assertEqual(by_code["MOCK_A.SH"], "2026-01-14T10:01:00")
+        self.assertEqual(by_code["MOCK_B.SH"], "2026-01-14T10:01:00")
+        self.assertEqual(by_code["MOCK_C.SH"], "2026-01-14T10:01:00")
+
+    def test_unsubscribe_keeps_global_clock_for_remaining_symbols(self):
+        """验证退订一个标的不影响其他标的按全局时钟继续推进。"""
+        svc, publisher, mock_cfg = _build_mock_service(codes=[])
+        svc.add_subscription(["MOCK_A.SH", "MOCK_B.SH"], ["1m"], preload_days=0)
+        feeder = MockBarFeeder(svc, mock_cfg)
+        feeder._mock_clock_dt = datetime(2026, 1, 14, 10, 0, tzinfo=CN_TZ)
+
+        with mock.patch("core.realtime_service.xtdata", None):
+            feeder._emit_cycle()
+            publisher.payloads.clear()
+
+            svc.remove_subscription(["MOCK_B.SH"], ["1m"])
+            feeder._emit_cycle()
+
+            self.assertEqual([bar["code"] for bar in publisher.payloads], ["MOCK_A.SH"])
+            self.assertEqual(publisher.payloads[0]["bar_end_ts"], "2026-01-14T10:01:00")
+
+            svc.remove_subscription(["MOCK_A.SH"], ["1m"])
+            feeder._emit_cycle()
+            count_after_all_removed = publisher.count()
+
+            svc.add_subscription(["MOCK_C.SH"], ["1m"], preload_days=0)
+            feeder._emit_cycle()
+
+        self.assertEqual(count_after_all_removed, 1)
+        self.assertEqual(publisher.payloads[-1]["code"], "MOCK_C.SH")
+        self.assertEqual(publisher.payloads[-1]["bar_end_ts"], "2026-01-14T10:02:00")
 
 
 if __name__ == "__main__":

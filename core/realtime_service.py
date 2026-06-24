@@ -116,6 +116,12 @@ class MockBarFeeder(threading.Thread):
         last_price: Optional[float] = None
         vol: Optional[float] = None
 
+    @dataclass
+    class _HistoryBaseline:
+        base_price: float
+        vol: Optional[float] = None
+        latest_dt: Optional[datetime] = None
+
     _PERIOD_SECONDS = {
         "1m": 60,
         "1h": 3600,
@@ -132,6 +138,8 @@ class MockBarFeeder(threading.Thread):
         self._states: Dict[Tuple[str, str], MockBarFeeder._State] = {}
         self._rng = random.Random(cfg.seed)
         self._code_params: Dict[str, float] = {}  # per-code fallback 波动率
+        self._history_cache: Dict[Tuple[str, str], Optional[MockBarFeeder._HistoryBaseline]] = {}
+        self._mock_clock_dt: Optional[datetime] = None
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -164,35 +172,89 @@ class MockBarFeeder(threading.Thread):
                 self._states.pop(key, None)
 
         now = datetime.now(CN_TZ)
-        for code, period in subs:
-            delta = self._period_delta(period)
-            if not delta:
-                self._log.debug("mock feeder skip unsupported period=%s", period)
-                continue
-            state = self._states.setdefault((code, period), MockBarFeeder._State())
-            if state.last_dt is None or state.last_price is None:
-                base_dt = self._align_base(now, delta) - delta
-                # 尝试基于历史行情初始化价格/波动率
-                hist_base = self._history_baseline(code, period)
-                if hist_base:
-                    base_price, hist_vol = hist_base
-                    state.vol = self._vol_for_code(code, hist_vol)
-                    self._log.info("[Mock] %s %s 使用历史基准 base=%.4f vol=%.6f", code, period, base_price, state.vol)
-                else:
-                    base_price = self._initial_price(code)
-                    state.vol = self._vol_for_code(code, None)
-                    self._log.info("[Mock] %s %s 历史获取失败，使用默认基准 base=%.4f vol=%.6f", code, period, base_price, state.vol)
-                seed_row = self._build_row(code, period, base_dt, base_price, close_price=base_price)
-                self._svc._on_datas(period, {code: [seed_row]})
-                state.last_dt = base_dt
-                state.last_price = base_price
+        one_min_subs = sorted(key for key in subs if key[1] == "1m")
+        if one_min_subs:
+            self._emit_cn_stock_1m_cycle(one_min_subs, now)
 
-            next_dt = state.last_dt + delta
+        other_subs = sorted(key for key in subs if key[1] != "1m")
+        for code, period in other_subs:
+            self._emit_legacy_period_cycle(code, period, now)
+
+    def _emit_legacy_period_cycle(self, code: str, period: str, now: datetime) -> None:
+        """按旧逻辑生成非 1m Mock 行情，避免扩大交易时钟改动范围。"""
+        delta = self._period_delta(period)
+        if not delta:
+            self._log.debug("mock feeder skip unsupported period=%s", period)
+            return
+        state = self._states.setdefault((code, period), MockBarFeeder._State())
+        if state.last_dt is None or state.last_price is None:
+            base_dt = self._align_base(now, delta) - delta
+            self._init_price_state(code, period, state)
+            seed_row = self._build_row(code, period, base_dt, state.last_price, close_price=state.last_price)
+            self._svc._on_datas(period, {code: [seed_row]})
+            state.last_dt = base_dt
+
+        next_dt = state.last_dt + delta
+        next_price = self._next_price(state.last_price, state.vol)
+        row = self._build_row(code, period, next_dt, state.last_price, close_price=next_price)
+        state.last_dt = next_dt
+        state.last_price = next_price
+        self._svc._on_datas(period, {code: [row]})
+
+    def _emit_cn_stock_1m_cycle(self, subs: List[Tuple[str, str]], now: datetime) -> None:
+        """按 A 股交易分钟推进 1m Mock 行情，所有标的共享同一个模拟时钟。"""
+        cycle_dt = self._ensure_mock_clock(subs, now)
+        next_dt = self._next_cn_stock_minute(cycle_dt)
+
+        for code, period in subs:
+            state = self._states.setdefault((code, period), MockBarFeeder._State())
+            if state.last_price is None:
+                self._init_price_state(code, period, state)
+
             next_price = self._next_price(state.last_price, state.vol)
-            row = self._build_row(code, period, next_dt, state.last_price, close_price=next_price)
-            state.last_dt = next_dt
+            current_row = self._build_row(code, period, cycle_dt, state.last_price, close_price=next_price)
+            # close_only 状态机需要看到下一根 bar，才能确认并发布当前 bar。
+            lookahead_row = self._build_row(code, period, next_dt, next_price, close_price=next_price)
+            self._svc._on_datas(period, {code: [current_row, lookahead_row]})
+            state.last_dt = cycle_dt
             state.last_price = next_price
-            self._svc._on_datas(period, {code: [row]})
+
+        self._mock_clock_dt = next_dt
+
+    def _init_price_state(self, code: str, period: str, state: _State) -> None:
+        """初始化单标的价格和波动率；时间由全局 Mock 时钟统一控制。"""
+        hist_base = self._get_history_baseline(code, period)
+        if hist_base:
+            base_price = hist_base.base_price
+            state.vol = self._vol_for_code(code, hist_base.vol)
+            self._log.info("[Mock] %s %s 使用历史基准 base=%.4f vol=%.6f", code, period, base_price, state.vol)
+        else:
+            base_price = self._initial_price(code)
+            state.vol = self._vol_for_code(code, None)
+            self._log.info("[Mock] %s %s 历史获取失败，使用默认基准 base=%.4f vol=%.6f", code, period, base_price, state.vol)
+        state.last_price = base_price
+
+    def _ensure_mock_clock(self, subs: List[Tuple[str, str]], now: datetime) -> datetime:
+        """初始化或返回全局 1m Mock 模拟时钟。"""
+        if self._mock_clock_dt is not None:
+            return self._mock_clock_dt
+
+        latest_candidates: List[datetime] = []
+        for code, period in subs:
+            hist_base = self._get_history_baseline(code, period)
+            if hist_base and hist_base.latest_dt is not None:
+                latest_candidates.append(hist_base.latest_dt)
+
+        if latest_candidates:
+            latest_dt = max(latest_candidates)
+            self._mock_clock_dt = self._next_cn_stock_minute(latest_dt)
+            self._log.info("[Mock] 全局模拟时钟使用历史最大时间初始化: latest=%s next=%s",
+                           latest_dt.isoformat(), self._mock_clock_dt.isoformat())
+        else:
+            self._mock_clock_dt = self._ceil_cn_stock_minute(now)
+            self._log.info("[Mock] 全局模拟时钟使用当前时间初始化: now=%s next=%s",
+                           now.isoformat(), self._mock_clock_dt.isoformat())
+        return self._mock_clock_dt
 
     @staticmethod
     def _period_delta(period: str) -> Optional[timedelta]:
@@ -208,6 +270,48 @@ class MockBarFeeder(threading.Thread):
         aligned_epoch = (epoch // secs) * secs
         return datetime.fromtimestamp(aligned_epoch, CN_TZ)
 
+    @staticmethod
+    def _as_cn_aware(dt: datetime) -> datetime:
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=CN_TZ)
+        return dt.astimezone(CN_TZ)
+
+    @staticmethod
+    def _ceil_cn_stock_minute(dt: datetime) -> datetime:
+        """返回当前时间之后最近的 A 股理论交易分钟。"""
+        dt = MockBarFeeder._as_cn_aware(dt)
+        base = dt.replace(second=0, microsecond=0)
+        candidate = base + timedelta(minutes=1)
+        return MockBarFeeder._normalize_cn_stock_minute(candidate)
+
+    @staticmethod
+    def _next_cn_stock_minute(dt: datetime) -> datetime:
+        """返回给定时间之后的下一根 A 股 1m bar 标签。"""
+        dt = MockBarFeeder._as_cn_aware(dt)
+        candidate = dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        return MockBarFeeder._normalize_cn_stock_minute(candidate)
+
+    @staticmethod
+    def _normalize_cn_stock_minute(candidate: datetime) -> datetime:
+        """将候选分钟归入 A 股日内交易分钟，暂不处理周末和节假日。"""
+        candidate = MockBarFeeder._as_cn_aware(candidate).replace(second=0, microsecond=0)
+        day = candidate.date()
+        am_start = datetime(day.year, day.month, day.day, 9, 30, tzinfo=CN_TZ)
+        am_end = datetime(day.year, day.month, day.day, 11, 30, tzinfo=CN_TZ)
+        pm_start = datetime(day.year, day.month, day.day, 13, 0, tzinfo=CN_TZ)
+        pm_end = datetime(day.year, day.month, day.day, 15, 0, tzinfo=CN_TZ)
+
+        if candidate < am_start:
+            return am_start
+        if candidate <= am_end:
+            return candidate
+        if candidate < pm_start:
+            return pm_start
+        if candidate <= pm_end:
+            return candidate
+        next_day = day + timedelta(days=1)
+        return datetime(next_day.year, next_day.month, next_day.day, 9, 30, tzinfo=CN_TZ)
+
     def _initial_price(self, code: str) -> float:
         jitter = (abs(hash(code)) % 500) / 100.0
         base = max(0.01, self._cfg.base_price + jitter)
@@ -219,8 +323,15 @@ class MockBarFeeder(threading.Thread):
         price = prev * math.exp(drift)
         return round(max(0.01, price), 4)
 
-    def _history_baseline(self, code: str, period: str) -> Optional[Tuple[float, Optional[float]]]:
-        """尝试从 xtdata 读取近期行情，提取最新价与波动率；失败则返回 None。"""
+    def _get_history_baseline(self, code: str, period: str) -> Optional[_HistoryBaseline]:
+        """读取并缓存单标的历史基准，避免同一轮重复访问 xtdata。"""
+        key = (code, period)
+        if key not in self._history_cache:
+            self._history_cache[key] = self._history_baseline(code, period)
+        return self._history_cache[key]
+
+    def _history_baseline(self, code: str, period: str) -> Optional[_HistoryBaseline]:
+        """尝试从 xtdata 读取近期行情，提取最新价、波动率和最新时间；失败则返回 None。"""
         if xtdata is None:
             return None
         # 先尝试下载近期数据以提升命中率（失败忽略）
@@ -271,17 +382,25 @@ class MockBarFeeder(threading.Thread):
             return None
 
         closes: List[float] = []
+        latest_dt: Optional[datetime] = None
         # 结构 1：field->DataFrame
         if "close" in data and "time" in data:
             close_df = data.get("close")
             if hasattr(close_df, "loc") and code in close_df.index:
                 series = close_df.loc[code]
                 closes = [float(x) for x in series.dropna().tolist() if pd.notna(x)]
+            time_df = data.get("time")
+            if hasattr(time_df, "loc") and code in time_df.index:
+                latest_dt = self._latest_time_from_series(time_df.loc[code])
         else:
             # 结构 2：code->DataFrame（index 通常为日期/时间，不含 code）
             for val in data.values():
                 if isinstance(val, pd.DataFrame) and "close" in val.columns:
                     closes = [float(x) for x in val["close"].dropna().tolist() if pd.notna(x)]
+                    if "time" in val.columns:
+                        latest_dt = self._latest_time_from_series(val["time"])
+                    else:
+                        latest_dt = self._latest_time_from_series(pd.Series(val.index))
                     break
         if not closes:
             return None
@@ -294,7 +413,19 @@ class MockBarFeeder(threading.Thread):
                     vol = float(np.std(rets))
             except Exception:
                 vol = None
-        return base_price, vol
+        return MockBarFeeder._HistoryBaseline(base_price=base_price, vol=vol, latest_dt=latest_dt)
+
+    @staticmethod
+    def _latest_time_from_series(series: Any) -> Optional[datetime]:
+        """从 xtdata 返回的时间列或索引中提取最新本地时间，再转为北京时间 aware。"""
+        try:
+            parsed = parse_local_naive_time_series(pd.Series(series).dropna()).dropna()
+        except Exception:
+            return None
+        if parsed.empty:
+            return None
+        latest = pd.Timestamp(parsed.iloc[-1]).to_pydatetime()
+        return latest.replace(tzinfo=CN_TZ)
 
     def _vol_for_code(self, code: str, hist_vol: Optional[float]) -> float:
         """返回单标的使用的波动率：优先历史估计，否则对默认波动率做 per-code 抖动。"""
