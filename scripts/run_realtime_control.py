@@ -10,6 +10,9 @@
 数据契约：
     - 配置文件结构与 `scripts/run_with_config.py` 使用的 AppConfig 保持一致。
     - 启动后不主动订阅任何 `(code, period)`，订阅来源必须是 Redis 控制通道。
+    - 本入口启动后，当前 QMTD 实例是同一 Redis topic 的真实行情权威源。
+    - 下游订阅不能选择真/假行情，真/假由 QMTD 启动入口决定。
+    - 不要与 `run_realtime_mock_control.py` 共用同一 topic 同时运行。
 
 外部系统：
     - MiniQMT / xtdata：真实行情连接。
@@ -83,10 +86,11 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     cfg = build_control_config(args.config)
     print(
-        "[CTRL] 空白启动：initial_codes=0 "
+        "[CTRL] 真实行情空白启动：source=real initial_codes=0 "
         f"periods={cfg.subscription.periods} ctrl={cfg.control.channel} ack={cfg.control.ack_prefix} "
         f"topic={cfg.redis.topic}"
     )
+    print("[CTRL] 唯一行情器规则：请勿与 Mock 控制入口共用同一 topic 同时运行。")
     run_from_config(cfg)
 
 

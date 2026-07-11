@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Optional
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from numbers import Integral, Real
 
 import numpy as np
 import pandas as pd
@@ -40,6 +41,7 @@ import pandas as pd
 from core.time_utils import parse_local_naive_time_series
 
 CN_TZ = timezone(timedelta(hours=8))
+MARKET_NUMERIC_DECIMALS = 10
 
 # QMT xtdata
 try:  # pragma: no cover
@@ -811,9 +813,29 @@ class RealtimeSubscriptionService:
         enriched = dict(payload)
         enriched.setdefault("source", "qmt")
         enriched["recv_ts"] = datetime.now(CN_TZ).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S")
+        enriched = self._normalize_market_numeric_payload(enriched)
         self.publisher.publish(enriched)
         with self._lock:
             self._last_pub_ts[(code, period)] = time.time()
+
+    @classmethod
+    def _normalize_market_numeric_payload(cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """统一规整 Redis 行情 payload 中的数值字段。"""
+        return {key: cls._normalize_market_numeric_value(value) for key, value in payload.items()}
+
+    @staticmethod
+    def _normalize_market_numeric_value(value: Any) -> Any:
+        """将行情数值统一保留 10 位小数，时间、字符串、布尔值保持原样。"""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, Integral):
+            return int(value)
+        if isinstance(value, Real):
+            numeric = float(value)
+            if math.isfinite(numeric):
+                return round(numeric, MARKET_NUMERIC_DECIMALS)
+            return numeric
+        return value
 
     # ----------------------------------------------------------------------
     # 预热（历史补齐）

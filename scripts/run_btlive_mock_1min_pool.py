@@ -8,6 +8,10 @@ BTLive 标准 1min Mock 实时行情常开入口。
     - 使用 close_only 模式，默认每 5 秒推送一次完整 1min bar。
     - 保持 Redis topic 与真实实时行情一致，便于 BTLive 无缝切换测试。
 
+边界：
+    - 本入口启动后，该 Redis topic 的行情源是 Mock。
+    - 不要与真实行情入口或 Mock 空白控制入口共用同一 topic 同时运行。
+
 使用方式：
     直接在 IDE 中右键运行本文件即可。
 """
@@ -122,6 +126,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         f"mode={cfg.subscription.mode} topic={cfg.redis.topic} "
         f"step={cfg.mock.step_seconds}s timestamp=local_naive_iso"
     )
+    print("[BTLIVE-MOCK] 唯一行情器规则：这是 Mock 权威源，请勿与真实入口共用同一 topic。")
     run_from_config(cfg)
 
 

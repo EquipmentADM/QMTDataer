@@ -156,6 +156,43 @@ class TestRealtimeService(unittest.TestCase):
         svc._on_datas("1m", datas)
         self.assertEqual(len(pub.messages), 1)  # 不增加
 
+    def test_publish_payload_normalizes_market_numeric_values(self):
+        """验证 Redis 发布前会统一规整行情数值，避免浮点尾巴污染下游。"""
+        _reload_realtime_fresh()
+        from core.realtime_service import RealtimeSubscriptionService, RealtimeConfig
+        pub = _FakePublisher()
+        cfg = RealtimeConfig(mode="close_only", periods=["1m"], codes=["000001.SZ"], close_delay_ms=0)
+        svc = RealtimeSubscriptionService(cfg, pub)
+
+        datas = {
+            "000001.SZ": [
+                {
+                    "time": "20250101 09:31:00",
+                    "open": 1.111111111111,
+                    "high": 2.222222222222,
+                    "low": 1.000000000009,
+                    "close": 1.7530000000000001,
+                    "volume": 100,
+                    "amount": 123.123456789123,
+                    "preClose": 1.234567891234,
+                    "isClosed": True,
+                },
+                {"time": "20250101 09:32:00", "close": 1.8, "isClosed": True},
+            ]
+        }
+        svc._on_datas("1m", datas)
+
+        self.assertEqual(len(pub.messages), 1)
+        msg = pub.messages[0]
+        self.assertEqual(repr(msg["close"]), "1.753")
+        self.assertEqual(msg["open"], 1.1111111111)
+        self.assertEqual(msg["high"], 2.2222222222)
+        self.assertEqual(msg["low"], 1.0)
+        self.assertEqual(msg["amount"], 123.1234567891)
+        self.assertEqual(msg["preClose"], 1.2345678912)
+        self.assertEqual(msg["volume"], 100)
+        self.assertIs(msg["is_closed"], True)
+
     def test_forming_and_close_dual_publish(self):
         """测试内容：forming_and_close 模式双发布
         目的：同一根 K 先推 forming(false) 再推 close(true)。

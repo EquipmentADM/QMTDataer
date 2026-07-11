@@ -2,6 +2,17 @@
 
 本目录的脚本按用途分为三类：实时桥运行、xtdata 入库、辅助排查。
 
+## 0. 实时行情唯一源规则
+
+同一套 Redis 行情 topic 在同一运行环境内只能有一个权威 QMTD 实时行情器。
+
+- 真行情和 Mock 行情由启动脚本决定，不由下游 `subscribe` 请求决定。
+- 下游只能声明 `codes`、`periods`、`mode` 与 `topic`，不能在订阅时选择真/假行情。
+- `run_realtime_control.py` 是真实行情空白控制入口。
+- `run_realtime_mock_control.py` 是虚拟行情空白控制入口。
+- 两个入口不能同时作为同一个 `xt:topic:bar` 的权威发布源运行。
+- 如需同时运行真/假两套服务，必须显式拆分 Redis topic 和控制通道。
+
 ## 1. 实时桥主链脚本
 
 - `run_with_config.py`
@@ -13,9 +24,21 @@
   - 场景：无 QMT/MiniQMT 环境时验证下游链路。
 
 - `run_realtime_control.py`
-  - 用途：实时行情控制面空白启动入口。
+  - 用途：真实实时行情控制面空白启动入口。
   - 场景：不预设初始订阅，启动后等待 Redis 控制通道的 `subscribe/unsubscribe/status`。
   - 默认：优先读取 `config/realtime_control.yml`。
+  - 注意：不要与 Mock 控制入口共用同一行情 topic 同时运行。
+
+- `run_realtime_mock_control.py`
+  - 用途：虚拟实时行情控制面空白启动入口。
+  - 场景：不预设初始订阅，启动后等待 Redis 控制通道申请 Mock 行情。
+  - 默认：优先读取 `config/realtime_mock_control.yml`。
+  - 注意：该实例收到的所有下游订阅都会生成 Mock 行情。
+
+- `run_btlive_mock_1min_pool.py`
+  - 用途：BTLive 标准 1min Mock 行情常开入口。
+  - 场景：固定 5 个常用标的，给 BTLive 做无真实 QMT 依赖的链路验证。
+  - 注意：这是主动常开 Mock 行情入口，不要与真实行情入口共用同一 topic。
 
 - `run_realtime_bridge.py`
   - 用途：早期参数化实时桥入口（兼容保留）。

@@ -10,6 +10,8 @@
 说明：
     该脚本启动后整个 QMTD 实例都是虚拟行情模式。BTLive 的订阅请求当前不区分
     真/假行情，真假由 QMTD 启动入口决定。
+    同一 Redis 行情 topic 只能有一个权威行情源，不要与真实行情控制入口共用
+    同一 topic 同时运行。
 """
 from __future__ import annotations
 
@@ -97,10 +99,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         seed=args.seed,
     )
     print(
-        "[MOCK-CTRL] 虚拟空白启动：initial_codes=0 "
+        "[MOCK-CTRL] 虚拟行情空白启动：source=mock initial_codes=0 "
         f"periods={cfg.subscription.periods} ctrl={cfg.control.channel} ack={cfg.control.ack_prefix} "
         f"topic={cfg.redis.topic} step={cfg.mock.step_seconds}s"
     )
+    print("[MOCK-CTRL] 唯一行情器规则：该实例收到的订阅都会生成 Mock 行情，请勿与真实入口共用同一 topic。")
     run_from_config(cfg)
 
 

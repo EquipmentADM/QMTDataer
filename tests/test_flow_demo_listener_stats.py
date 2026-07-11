@@ -101,6 +101,25 @@ class TestFlowDemoListenerStats(unittest.TestCase):
         self.assertEqual(summary["partial_groups"], 1)
         self.assertEqual(summary["full_groups"], 0)
 
+    def test_metric_splits_qmtd_publish_span_and_redis_delay(self) -> None:
+        """同轮统计应能拆分 QMTD 发布时间跨度和 Redis 后段延迟。"""
+        stats = ReceiveStats(["A.SH", "B.SH"], ["1m"])
+
+        stats.record("A.SH", "1m", "2026-06-29T09:51:00", 110.0, qmtd_recv_ts=100.0)
+        metric = stats.record("B.SH", "1m", "2026-06-29T09:51:00", 113.0, qmtd_recv_ts=102.0)
+
+        self.assertIsNotNone(metric)
+        self.assertEqual(metric.span_sec, 3.0)
+        self.assertEqual(metric.qmtd_span_sec, 2.0)
+        self.assertEqual(metric.redis_delay_avg_sec, 10.5)
+        self.assertEqual(metric.redis_delay_max_sec, 11.0)
+
+        summary = stats.build_summary()["period_summary"]["1m"]
+        self.assertEqual(summary["avg_qmtd_span_sec"], 2.0)
+        self.assertEqual(summary["max_qmtd_span_sec"], 2.0)
+        self.assertEqual(summary["avg_redis_delay_sec"], 10.5)
+        self.assertEqual(summary["max_redis_delay_sec"], 11.0)
+
     def test_default_main_is_listen_only_and_auto_discover(self) -> None:
         """默认运行不应主动发送 subscribe，且不要求 codes。"""
 

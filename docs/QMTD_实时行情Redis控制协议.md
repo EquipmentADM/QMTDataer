@@ -11,6 +11,21 @@
 - 发起历史行情下载或 FD 数据库入库任务。
 - 管理策略生命周期。
 
+## 1.1 唯一行情器规则
+
+同一套 Redis 行情 topic 在同一运行环境内只能有一个权威 QMTD 实时行情器。
+
+规则如下：
+
+- 真行情和 Mock 行情由 QMTD 启动入口决定，不由下游 `subscribe` 请求决定。
+- 下游 BTLive / 策略端只能声明 `codes`、`periods`、`mode` 与 `topic`，不能在订阅时要求“真行情”或“假行情”。
+- `run_realtime_control.py` 是真实行情空白控制入口，会连接 MiniQMT / xtdata。
+- `run_realtime_mock_control.py` 是虚拟行情空白控制入口，会强制启用 Mock 行情。
+- 两个入口不能同时作为同一个 `xt:topic:bar` 的权威发布源运行。
+- 如果确需同时运行真/假两套服务，必须显式配置不同 Redis topic 和不同控制通道，并让下游明确订阅对应 topic。
+
+违反该规则会导致同一 `(code, period, bar_end_ts)` 可能被两个来源同时发布，下游无法可靠判断哪一条是权威行情。
+
 ## 2. 通道约定
 
 默认通道如下：

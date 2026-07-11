@@ -37,6 +37,14 @@ _AUTO_DISCOVER_CODES = "__AUTO__"
 
 
 @dataclass
+class ReceiveRecord:
+    """单条 bar 的接收观测记录。"""
+
+    listener_ts: float
+    qmtd_recv_ts: Optional[float] = None
+
+
+@dataclass
 class GroupMetric:
     """单轮同周期 bar 接收统计结果。"""
 
@@ -49,6 +57,11 @@ class GroupMetric:
     avg_recv: float
     span_sec: float
     mean_abs_error_sec: float
+    qmtd_first_recv: Optional[float] = None
+    qmtd_last_recv: Optional[float] = None
+    qmtd_span_sec: Optional[float] = None
+    redis_delay_avg_sec: Optional[float] = None
+    redis_delay_max_sec: Optional[float] = None
     codes: List[str] = field(default_factory=list)
     missing_codes: List[str] = field(default_factory=list)
     extra_codes: List[str] = field(default_factory=list)
@@ -75,7 +88,7 @@ class ReceiveStats:
         self.expected_codes_by_period: Dict[str, Set[str]] = {
             period: set(expected_set) for period in periods
         }
-        self.groups: Dict[Tuple[str, str], Dict[str, float]] = {}
+        self.groups: Dict[Tuple[str, str], Dict[str, ReceiveRecord]] = {}
         self.completed_keys: Set[Tuple[str, str]] = set()
         self.finalized_keys: Set[Tuple[str, str]] = set()
         self.metrics: List[GroupMetric] = []
@@ -83,7 +96,14 @@ class ReceiveStats:
         self.total_bars = 0
         self.observed_codes_by_period: Dict[str, Set[str]] = {period: set() for period in periods}
 
-    def record(self, code: str, period: str, bar_ts: str, recv_ts: float) -> Optional[GroupMetric]:
+    def record(
+        self,
+        code: str,
+        period: str,
+        bar_ts: str,
+        recv_ts: float,
+        qmtd_recv_ts: Optional[float] = None,
+    ) -> Optional[GroupMetric]:
         """记录一条 bar 的 Redis 接收时间。"""
         if not code or not period or not bar_ts:
             return None
@@ -91,7 +111,7 @@ class ReceiveStats:
         group = self.groups.setdefault(key, {})
         if code not in group:
             self.total_bars += 1
-        group[code] = recv_ts
+        group[code] = ReceiveRecord(listener_ts=recv_ts, qmtd_recv_ts=qmtd_recv_ts)
         self.observed_codes_by_period.setdefault(period, set()).add(code)
 
         if key in self.completed_keys or key in self.finalized_keys:
@@ -126,7 +146,7 @@ class ReceiveStats:
             group = self.groups[key]
             if not group:
                 continue
-            first_recv = min(group.values())
+            first_recv = min(item.listener_ts for item in group.values())
             if now_ts - first_recv <= self._half_period_seconds(period):
                 continue
 
@@ -164,6 +184,9 @@ class ReceiveStats:
         for period, items in by_period.items():
             spans = [item.span_sec for item in items]
             mean_abs_errors = [item.mean_abs_error_sec for item in items]
+            qmtd_spans = [item.qmtd_span_sec for item in items if item.qmtd_span_sec is not None]
+            redis_delay_avgs = [item.redis_delay_avg_sec for item in items if item.redis_delay_avg_sec is not None]
+            redis_delay_maxes = [item.redis_delay_max_sec for item in items if item.redis_delay_max_sec is not None]
             counts = [item.received_count for item in items]
             full_items = [item for item in items if item.is_complete]
             partial_items = [item for item in items if not item.is_complete]
@@ -178,6 +201,10 @@ class ReceiveStats:
                 "max_span_sec": max(spans) if spans else 0.0,
                 "avg_mean_abs_error_sec": statistics.mean(mean_abs_errors) if mean_abs_errors else 0.0,
                 "max_mean_abs_error_sec": max(mean_abs_errors) if mean_abs_errors else 0.0,
+                "avg_qmtd_span_sec": statistics.mean(qmtd_spans) if qmtd_spans else None,
+                "max_qmtd_span_sec": max(qmtd_spans) if qmtd_spans else None,
+                "avg_redis_delay_sec": statistics.mean(redis_delay_avgs) if redis_delay_avgs else None,
+                "max_redis_delay_sec": max(redis_delay_maxes) if redis_delay_maxes else None,
                 "last_bar_ts": items[-1].bar_ts if items else "",
                 "observed_codes": sorted(self.observed_codes_by_period.get(period, set())),
             }
@@ -195,14 +222,25 @@ class ReceiveStats:
     def _build_metric(
         period: str,
         bar_ts: str,
-        group: Dict[str, float],
+        group: Dict[str, ReceiveRecord],
         expected_codes: Optional[Set[str]],
     ) -> GroupMetric:
-        recv_values = list(group.values())
+        recv_values = [item.listener_ts for item in group.values()]
+        qmtd_values = [item.qmtd_recv_ts for item in group.values() if item.qmtd_recv_ts is not None]
+        redis_delays = [
+            item.listener_ts - item.qmtd_recv_ts
+            for item in group.values()
+            if item.qmtd_recv_ts is not None
+        ]
         first_recv = min(recv_values) if recv_values else 0.0
         last_recv = max(recv_values) if recv_values else 0.0
         avg_recv = statistics.mean(recv_values) if recv_values else 0.0
         mean_abs_error = statistics.mean([abs(item - avg_recv) for item in recv_values]) if recv_values else 0.0
+        qmtd_first = min(qmtd_values) if qmtd_values else None
+        qmtd_last = max(qmtd_values) if qmtd_values else None
+        qmtd_span = (qmtd_last - qmtd_first) if qmtd_first is not None and qmtd_last is not None else None
+        redis_delay_avg = statistics.mean(redis_delays) if redis_delays else None
+        redis_delay_max = max(redis_delays) if redis_delays else None
         codes = sorted(group.keys())
         expected_count = len(expected_codes) if expected_codes else None
         missing_codes = sorted(expected_codes.difference(group.keys())) if expected_codes else []
@@ -217,6 +255,11 @@ class ReceiveStats:
             avg_recv=avg_recv,
             span_sec=last_recv - first_recv,
             mean_abs_error_sec=mean_abs_error,
+            qmtd_first_recv=qmtd_first,
+            qmtd_last_recv=qmtd_last,
+            qmtd_span_sec=qmtd_span,
+            redis_delay_avg_sec=redis_delay_avg,
+            redis_delay_max_sec=redis_delay_max,
             codes=codes,
             missing_codes=missing_codes,
             extra_codes=extra_codes,
@@ -273,6 +316,23 @@ def _fmt_ts(epoch_sec: float) -> str:
     return datetime.fromtimestamp(epoch_sec).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
+def _fmt_seconds(value: Optional[float]) -> str:
+    """格式化秒数，空值显示为短横线。"""
+    if value is None:
+        return "-"
+    return f"{value:.3f}s"
+
+
+def _parse_payload_time(value: object) -> Optional[float]:
+    """解析 QMTD payload 中的本地无时区时间字符串。"""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace(" ", "T")).timestamp()
+    except Exception:
+        return None
+
+
 def _preview_codes(codes: List[str], limit: int = 8) -> str:
     """压缩显示标的列表。"""
     if not codes:
@@ -294,6 +354,9 @@ def _print_group_metric(metric: GroupMetric) -> None:
         f"平均={_fmt_ts(metric.avg_recv)} "
         f"跨度={metric.span_sec:.3f}s "
         f"平均绝对误差={metric.mean_abs_error_sec:.3f}s "
+        f"QMTD发布跨度={_fmt_seconds(metric.qmtd_span_sec)} "
+        f"Redis后段平均延迟={_fmt_seconds(metric.redis_delay_avg_sec)} "
+        f"Redis后段最大延迟={_fmt_seconds(metric.redis_delay_max_sec)} "
         f"标的={_preview_codes(metric.codes)}"
     )
 
@@ -308,6 +371,8 @@ def _print_finalized_metric(metric: GroupMetric) -> None:
         f"周期={metric.period} bar={metric.bar_ts} "
         f"标的数={metric.expected_label} "
         f"跨度={metric.span_sec:.3f}s "
+        f"QMTD发布跨度={_fmt_seconds(metric.qmtd_span_sec)} "
+        f"Redis后段最大延迟={_fmt_seconds(metric.redis_delay_max_sec)} "
         f"缺失={_preview_codes(metric.missing_codes)} "
         f"额外={_preview_codes(metric.extra_codes)} "
         "说明=已按收到标的统计延迟，覆盖率不足需单独关注"
@@ -336,6 +401,10 @@ def _print_summary(stats: ReceiveStats, title: str) -> None:
             f"平均跨度={item['avg_span_sec']:.3f}s 最大跨度={item['max_span_sec']:.3f}s "
             f"平均绝对误差均值={item['avg_mean_abs_error_sec']:.3f}s "
             f"平均绝对误差最大={item['max_mean_abs_error_sec']:.3f}s "
+            f"QMTD平均发布跨度={_fmt_seconds(item['avg_qmtd_span_sec'])} "
+            f"QMTD最大发布跨度={_fmt_seconds(item['max_qmtd_span_sec'])} "
+            f"Redis后段平均延迟={_fmt_seconds(item['avg_redis_delay_sec'])} "
+            f"Redis后段最大延迟={_fmt_seconds(item['max_redis_delay_sec'])} "
             f"最近bar={item['last_bar_ts']}"
         )
         print(f"    已发现标的池={_preview_codes(item['observed_codes'], limit=20)}")
@@ -526,7 +595,13 @@ def main(argv: Optional[List[str]] = None):
                     bar_ts = bar.get("bar_end_ts") or bar.get("time") or ""
                     print("[BAR]", code, period, bar_ts,
                           "close=", bar.get("close"), "is_closed=", bar.get("is_closed"))
-                    metric = stats.record(str(code or ""), str(period or ""), str(bar_ts or ""), recv_ts)
+                    metric = stats.record(
+                        str(code or ""),
+                        str(period or ""),
+                        str(bar_ts or ""),
+                        recv_ts,
+                        qmtd_recv_ts=_parse_payload_time(bar.get("recv_ts")),
+                    )
                     if metric:
                         _print_group_metric(metric)
                 except Exception:
